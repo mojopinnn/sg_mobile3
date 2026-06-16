@@ -1,0 +1,346 @@
+{
+  "projects": [
+    {
+      "id": 1,
+      "name": "Project Alpha (VFX Feature)",
+      "code": "PALP",
+      "sg_status": "Active",
+      "sg_sub_status": "onset"
+    },
+    {
+      "id": 2,
+      "name": "Project Beta (Cyberpunk Series)",
+      "code": "PBET",
+      "sg_status": "Active",
+      "sg_sub_status": "turn over"
+    },
+    {
+      "id": 3,
+      "name": "Project Gamma (Commercial)",
+      "code": "PGAM",
+      "sg_status": "Active",
+      "sg_sub_status": "fin"
+    }
+  ],
+  "tasks": [
+    {
+      "id": 11,
+      "content": "3D Space Cruiser Layout",
+      "sg_status_list": "ip",
+      "start_date": "2026-05-01",
+      "due_date": "2026-06-15",
+      "project": {
+        "id": 1,
+        "name": "Project Alpha (VFX Feature)"
+      },
+      "entity": {
+        "id": 201,
+        "name": "Space_Cruiser_A",
+        "type": "Asset"
+      },
+      "step": {
+        "name": "Layout"
+      },
+      "task_assignees": [
+        {
+          "id": 4,
+          "name": "최동현",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": [
+        {
+          "id": 1001,
+          "subject": "피드백 주석",
+          "content": "스케일감을 조금 더 키워주세요. 카메라 렌즈 화각은 35mm로 맞춰주시기 바랍니다.",
+          "user": {
+            "name": "김수연 수퍼바이저"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "content": "Nebula Space Painting BG",
+      "sg_status_list": "fin",
+      "start_date": "2026-04-10",
+      "due_date": "2026-05-10",
+      "project": {
+        "id": 1,
+        "name": "Project Alpha (VFX Feature)"
+      },
+      "entity": {
+        "id": 202,
+        "name": "Nebula_Sky_01",
+        "type": "Asset"
+      },
+      "step": {
+        "name": "Matte Painting"
+      },
+      "task_assignees": [
+        {
+          "id": 1,
+          "name": "김수연",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "id": 122,
+      "content": "Space Cruiser Comp",
+      "sg_status_list": "dok",
+      "start_date": "2026-05-10",
+      "due_date": "2026-06-10",
+      "project": {
+        "id": 1,
+        "name": "Project Alpha (VFX Feature)"
+      },
+      "entity": {
+        "id": 201,
+        "name": "Space_Cruiser_A",
+        "type": "Asset"
+      },
+      "step": {
+        "name": "Comp"
+      },
+      "task_assignees": [
+        {
+          "id": 4,
+          "name": "최동현",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "id": 13,
+      "content": "Cyberpunk Neon Alley Comp",
+      "sg_status_list": "ip",
+      "start_date": "2026-05-15",
+      "due_date": "2026-06-20",
+      "project": {
+        "id": 2,
+        "name": "Project Beta (Cyberpunk Series)"
+      },
+      "entity": {
+        "id": 301,
+        "name": "Shot_010",
+        "type": "Shot"
+      },
+      "step": {
+        "name": "Comp"
+      },
+      "task_assignees": [
+        {
+          "id": 3,
+          "name": "박지수",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "id": 132,
+      "content": "Matte Painting Alley BG",
+      "sg_status_list": "dis",
+      "start_date": "2026-05-10",
+      "due_date": "2026-06-10",
+      "project": {
+        "id": 2,
+        "name": "Project Beta (Cyberpunk Series)"
+      },
+      "entity": {
+        "id": 301,
+        "name": "Shot_010",
+        "type": "Shot"
+      },
+      "step": {
+        "name": "Matte"
+      },
+      "task_assignees": [
+        {
+          "id": 1,
+          "name": "김수연",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "id": 14,
+      "content": "Neon Signs Asset Texture",
+      "sg_status_list": "wtg",
+      "start_date": "2026-06-01",
+      "due_date": "2026-06-30",
+      "project": {
+        "id": 2,
+        "name": "Project Beta (Cyberpunk Series)"
+      },
+      "entity": {
+        "id": 302,
+        "name": "Neon_Signboard_Set",
+        "type": "Asset"
+      },
+      "step": {
+        "name": "Texture"
+      },
+      "task_assignees": [
+        {
+          "id": 2,
+          "name": "이우진",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "id": 15,
+      "content": "Commercial Logo Motion Graphic",
+      "sg_status_list": "ip",
+      "start_date": "2026-05-25",
+      "due_date": "2026-06-05",
+      "project": {
+        "id": 3,
+        "name": "Project Gamma (Commercial)"
+      },
+      "entity": {
+        "id": 401,
+        "name": "Shot_001",
+        "type": "Shot"
+      },
+      "step": {
+        "name": "Motion"
+      },
+      "task_assignees": [
+        {
+          "id": 4,
+          "name": "최동현",
+          "type": "HumanUser"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "versions": [
+    {
+      "id": 101,
+      "code": "PALP_Space_Cruiser_v001",
+      "sg_status_list": "rev",
+      "sg_version_number": 1,
+      "project": {
+        "id": 1,
+        "name": "Project Alpha (VFX Feature)"
+      },
+      "entity": {
+        "id": 201,
+        "name": "Space_Cruiser_A",
+        "type": "Asset"
+      },
+      "description": "첫 번째 레이아웃 애니메이션 프리뷰 제출본입니다."
+    },
+    {
+      "id": 102,
+      "code": "PBET_Shot_010_Comp_v004",
+      "sg_status_list": "rev",
+      "sg_version_number": 4,
+      "project": {
+        "id": 2,
+        "name": "Project Beta (Cyberpunk Series)"
+      },
+      "entity": {
+        "id": 301,
+        "name": "Shot_010",
+        "type": "Shot"
+      },
+      "description": "색수차 필터링 및 네온 라이팅 반사광 추가 적용 완료."
+    }
+  ],
+  "shots": [
+    {
+      "id": 301,
+      "code": "Shot_010",
+      "description": "주인공이 네온 골목을 걷는 샷",
+      "image": null,
+      "sg_org_thumbnail": "https://picsum.photos/id/1/200/120",
+      "sg_status_list": "ip",
+      "sg_work_order": "WO-2026-010A",
+      "project": {
+        "id": 2,
+        "name": "Project Beta (Cyberpunk Series)"
+      },
+      "parsed_tasks": [
+        {
+          "id": 13,
+          "content": "Cyberpunk Neon Alley Comp",
+          "step": "Comp",
+          "assignee_name": "박지수",
+          "due_date": "2026-06-20",
+          "status": "ip"
+        },
+        {
+          "id": 99,
+          "content": "Lighting Setup",
+          "step": "Lighting",
+          "assignee_name": "김조명",
+          "due_date": "2026-06-25",
+          "status": "wtg"
+        }
+      ]
+    },
+    {
+      "id": 401,
+      "code": "Shot_001",
+      "description": "오프닝 로고 모션",
+      "image": null,
+      "sg_org_thumbnail": "https://picsum.photos/id/2/200/120",
+      "sg_status_list": "fin",
+      "sg_work_order": "WO-2026-001F",
+      "project": {
+        "id": 3,
+        "name": "Project Gamma (Commercial)"
+      },
+      "parsed_tasks": [
+        {
+          "id": 15,
+          "content": "Commercial Logo Motion Graphic",
+          "step": "Motion",
+          "assignee_name": "최동현",
+          "due_date": "2026-06-05",
+          "status": "fin"
+        }
+      ]
+    },
+    {
+      "id": 201,
+      "code": "SC_001",
+      "description": "우주선 비행 씬",
+      "image": null,
+      "sg_org_thumbnail": "https://picsum.photos/id/3/200/120",
+      "sg_status_list": "wtg",
+      "sg_work_order": "WO-2026-015W",
+      "project": {
+        "id": 1,
+        "name": "Project Alpha (VFX Feature)"
+      },
+      "parsed_tasks": [
+        {
+          "id": 11,
+          "content": "3D Space Cruiser Layout",
+          "step": "Layout",
+          "assignee_name": "최동현",
+          "due_date": "2026-06-15",
+          "status": "fin"
+        },
+        {
+          "id": 110,
+          "content": "Animation Pass",
+          "step": "Anim",
+          "assignee_name": "이애니",
+          "due_date": "2026-06-18",
+          "status": "ip"
+        }
+      ]
+    }
+  ]
+}
