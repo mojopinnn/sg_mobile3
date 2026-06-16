@@ -80,7 +80,7 @@ function sortParsedTasks(parsed_tasks: any[]) {
   };
 
   const getWeight = (task: any) => {
-    const step = (task.step || task.content || "").toLowerCase();
+    const step = (task.sg_task || task.step || task.content || "").toLowerCase();
     for (const [k, w] of Object.entries(orderWeights)) {
       if (step.includes(k)) {
         return w;
@@ -360,13 +360,34 @@ app.get("/api/projects", async (req, res) => {
     } else {
       const token = await getAccessToken(config);
       rawProjects = await getProjectsFromShotgrid(config, token);
-      tasks = await fetchShotgridSearch(
-        config,
-        token,
-        "Task",
-        [],
-        ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees"]
-      );
+      
+      const activeProjects = rawProjects.filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin"; // Filter out completed projects
+      });
+
+      console.log(`[DEBUG] Found ${activeProjects.length} active projects on ShotGrid. Fetching tasks per project...`);
+
+      const tasksPromises = activeProjects.map(async (p: any) => {
+        try {
+          const projTasks = await fetchShotgridSearch(
+            config,
+            token,
+            "Task",
+            [["project", "is", { type: "Project", id: p.id }]],
+            ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
+          );
+          console.log(`[DEBUG] Project "${p.name}" (ID: ${p.id}) has ${projTasks.length} tasks matching search.`);
+          return projTasks;
+        } catch (err: any) {
+          console.error(`[ERROR] Failed to fetch tasks for project ${p.id}:`, err.message);
+          return [];
+        }
+      });
+
+      const results = await Promise.all(tasksPromises);
+      tasks = results.flat();
+      console.log(`[DEBUG] Total tasks fetched across all active projects: ${tasks.length}`);
     }
 
     const projectsWithProgress = rawProjects
@@ -387,12 +408,10 @@ app.get("/api/projects", async (req, res) => {
           let status = (t.sg_status_list || "").toLowerCase().trim();
           if (["double check", "doublecheck", "dok"].includes(status)) status = "dok";
           else if (["distribute", "di-sen", "dis", "disen"].includes(status)) status = "di-sen";
-          else if (["approved", "apr", "final", "fin", "complete"].includes(status)) status = "fin";
+          else if (["approved", "apr", "final", "fin", "complete", "cmpt", "y"].includes(status)) status = "fin";
 
-          const stepName = t.step?.name || "";
-          const content = t.content || "";
-          const targetStr = `${stepName} ${content}`.toLowerCase();
-          const isComp = targetStr.includes("comp");
+          const taskName = (t.sg_task || t.step?.name || t.content || "").toLowerCase();
+          const isComp = taskName.includes("comp");
 
           if (isComp && ["dok", "di-sen", "qc", "fin"].includes(status)) {
             if (t.entity?.id) {
@@ -419,7 +438,7 @@ app.get("/api/projects", async (req, res) => {
           let status = (t.sg_status_list || "").toLowerCase().trim();
           if (["double check", "doublecheck", "dok"].includes(status)) status = "dok";
           else if (["distribute", "di-sen", "dis", "disen"].includes(status)) status = "di-sen";
-          else if (["approved", "apr", "final", "fin", "complete"].includes(status)) status = "fin";
+          else if (["approved", "apr", "final", "fin", "complete", "cmpt", "y"].includes(status)) status = "fin";
 
           const hasCompCompleteForEntity = t.entity?.id ? completedCompEntities.has(t.entity.id) : false;
           const isCompletedA = groupAStatuses.includes(status) || status === "fin" || hasCompCompleteForEntity;
@@ -437,12 +456,10 @@ app.get("/api/projects", async (req, res) => {
             }
           }
 
-          const stepName = t.step?.name || "";
-          const content = t.content || "";
-          const targetStr = `${stepName} ${content}`.toLowerCase();
+          const taskName = (t.sg_task || t.step?.name || t.content || "").toLowerCase();
 
-          const isMatte = targetStr.includes("matte") || targetStr.includes("matter");
-          const isComp = targetStr.includes("comp");
+          const isMatte = taskName.includes("matte") || taskName.includes("matter");
+          const isComp = taskName.includes("comp");
 
           if (isMatte) {
             matteTasks++;
@@ -460,6 +477,11 @@ app.get("/api/projects", async (req, res) => {
 
         const matte_progress = matteTasks > 0 ? Math.round((completedMatte / matteTasks) * 100) : null;
         const comp_progress = compTasks > 0 ? Math.round((completedComp / compTasks) * 100) : null;
+
+        console.log(`[DEBUG_PROJECT] Proj: "${p.name}" (ID: ${p.id})`);
+        console.log(` - totalTasks: ${totalTasks}, completedATasks: ${completedATasks}`);
+        console.log(` - progress_1: ${progress_1}%, progress_2: ${progress_2}%, progress_3: ${progress_3}%`);
+        console.log(` - matte_progress: ${matte_progress}%, comp_progress: ${comp_progress}%`);
 
         return {
           ...p,
@@ -557,14 +579,14 @@ app.get("/api/project/:id/shots", async (req, res) => {
       token,
       "Task",
       [["project", "is", { type: "Project", id: projectId }]],
-      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees"]
+      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
     );
 
     const mappedShots = shots.map((s: any) => {
       const shotTasks = tasks.filter((t: any) => t.entity && t.entity.id === s.id && t.entity.type === "Shot");
       const parsed_tasks = shotTasks.map((t: any) => {
-        let stepName = t.step?.name || (t.step ? String(t.step) : "Comp");
-        if (typeof t.step === "object" && t.step !== null) {
+        let stepName = t.sg_task || t.step?.name || (t.step ? String(t.step) : "Comp");
+        if (!t.sg_task && typeof t.step === "object" && t.step !== null) {
           stepName = t.step.name || "Comp";
         }
         const assignee_name = t.task_assignees ? t.task_assignees.map((a: any) => a.name).join(", ") : "";
@@ -572,6 +594,7 @@ app.get("/api/project/:id/shots", async (req, res) => {
           id: t.id,
           content: t.content || "",
           step: stepName,
+          sg_task: t.sg_task,
           assignee_name: cleanAssigneeName(assignee_name),
           due_date: t.due_date,
           status: t.sg_status_list || "wtg"
@@ -671,7 +694,7 @@ app.get("/api/tasks", async (req, res) => {
       token,
       "Task",
       filters,
-      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees"]
+      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
     );
 
     filtered = tasks;
@@ -708,7 +731,7 @@ app.get("/api/task/:id", async (req, res) => {
       token,
       "Task",
       [["id", "is", taskId]],
-      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees"]
+      ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
     );
 
     if (tasks.length === 0) {
@@ -1099,27 +1122,60 @@ app.get("/api/dashboard-stats", async (req, res) => {
     } else {
       const token = await getAccessToken(config);
       projects = await getProjectsFromShotgrid(config, token);
-      tasks = await fetchShotgridSearch(
-        config,
-        token,
-        "Task",
-        [],
-        ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees"]
-      );
-      versions = await fetchShotgridSearch(
-        config,
-        token,
-        "Version",
-        [],
-        ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
-      );
+
+      const activeProjects = projects.filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin"; // Filter out completed projects
+      });
+
+      console.log(`[DASHBOARD DEBUG] Fetching tasks & versions per active project...`);
+
+      const tasksPromises = activeProjects.map(async (p: any) => {
+        try {
+          return await fetchShotgridSearch(
+            config,
+            token,
+            "Task",
+            [["project", "is", { type: "Project", id: p.id }]],
+            ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
+          );
+        } catch (err: any) {
+          console.error(`[DASHBOARD ERROR] Failed to fetch tasks for project ${p.id}:`, err.message);
+          return [];
+        }
+      });
+
+      const versionsPromises = activeProjects.map(async (p: any) => {
+        try {
+          return await fetchShotgridSearch(
+            config,
+            token,
+            "Version",
+            [["project", "is", { type: "Project", id: p.id }]],
+            ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
+          );
+        } catch (err: any) {
+          console.error(`[DASHBOARD ERROR] Failed to fetch versions for project ${p.id}:`, err.message);
+          return [];
+        }
+      });
+
+      const [tasksResults, versionsResults] = await Promise.all([
+        Promise.all(tasksPromises),
+        Promise.all(versionsPromises)
+      ]);
+
+      tasks = tasksResults.flat();
+      versions = versionsResults.flat();
+
+      console.log(`[DASHBOARD DEBUG] Fetched ${tasks.length} tasks and ${versions.length} versions.`);
     }
 
     const totalTasks = tasks.length;
     const wtgCount = tasks.filter((t: any) => t.sg_status_list === "wtg").length;
     const ipCount = tasks.filter((t: any) => t.sg_status_list === "ip").length;
     const revCount = tasks.filter((t: any) => t.sg_status_list === "rev").length;
-    const finCount = tasks.filter((t: any) => ["fin", "apr"].includes(t.sg_status_list)).length;
+    const finCount = tasks.filter((t: any) => ["fin", "apr", "approved", "complete", "cmpt"].includes((t.sg_status_list || "").toLowerCase())).length;
 
     const progress = totalTasks > 0 ? Math.round((finCount / totalTasks) * 100) : 0;
     const pendingVersions = versions.filter((v: any) => v.sg_status_list === "rev").slice(0, 3);

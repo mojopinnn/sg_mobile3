@@ -9,6 +9,7 @@ export interface Task {
   id: number;
   content: string;
   sg_status_list: string;
+  sg_task?: string;
   start_date?: string;
   due_date?: string;
   project: { id: number; name: string };
@@ -32,6 +33,7 @@ export interface ParsedTask {
   id: number;
   content: string;
   step: string;
+  sg_task?: string;
   assignee_name: string;
   due_date?: string;
   status: string;
