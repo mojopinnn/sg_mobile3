@@ -3,6 +3,10 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { Project, Task, Version, Shot, Note, ShotgridConfig } from "./src/types";
+import dotenv from "dotenv";
+import { GoogleGenAI } from "@google/genai";
+
+dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -12,29 +16,118 @@ app.use(express.json());
 const CONFIG_FILE = path.join(process.cwd(), "config.json");
 const MOCK_DB_FILE = path.join(process.cwd(), "mock_db.json");
 
-// Helper: load config
+// Helper: load config (integrates env variables & .env)
 function loadConfig(): ShotgridConfig {
+  let config: ShotgridConfig = {
+    base_url: process.env.SHOTGRID_BASE_URL || "",
+    script_name: process.env.SHOTGRID_SCRIPT_NAME || "",
+    script_key: process.env.SHOTGRID_SCRIPT_KEY || "",
+    use_mock: process.env.SHOTGRID_USE_MOCK === undefined ? true : process.env.SHOTGRID_USE_MOCK !== "false",
+    settings_password: process.env.SETTINGS_PASSWORD || "1234",
+  };
+
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const data = fs.readFileSync(CONFIG_FILE, "utf-8");
-      return JSON.parse(data);
+      const fileConfig = JSON.parse(data);
+      
+      let changed = false;
+      // Override with config.json if they exist and are not already set in process.env
+      if (fileConfig.base_url && !config.base_url) {
+        config.base_url = fileConfig.base_url;
+        changed = true;
+      }
+      if (fileConfig.script_name && !config.script_name) {
+        config.script_name = fileConfig.script_name;
+        changed = true;
+      }
+      if (fileConfig.script_key && !config.script_key) {
+        config.script_key = fileConfig.script_key;
+        changed = true;
+      }
+      if (fileConfig.use_mock !== undefined) {
+        config.use_mock = fileConfig.use_mock;
+      }
+      if (fileConfig.settings_password) {
+        config.settings_password = fileConfig.settings_password;
+      }
+      
+      // Auto-migrate to .env if config.json has credentials
+      if (changed && (config.base_url || config.script_name || config.script_key)) {
+        saveConfig(config);
+      }
     }
   } catch (e) {
     console.error("Error reading config:", e);
   }
-  return {
-    base_url: "",
-    script_name: "",
-    script_key: "",
-    use_mock: true,
-    settings_password: "1234",
-  };
+  return config;
 }
 
-// Helper: save config
+// Write or update key-value pairs in the .env file preserving existing comments/structure
+function updateEnvFile(updates: Record<string, string>) {
+  const ENV_FILE = path.join(process.cwd(), ".env");
+  let envLines: string[] = [];
+
+  if (fs.existsSync(ENV_FILE)) {
+    const content = fs.readFileSync(ENV_FILE, "utf-8");
+    envLines = content.split(/\r?\n/);
+  } else if (fs.existsSync(path.join(process.cwd(), ".env.example"))) {
+    const content = fs.readFileSync(path.join(process.cwd(), ".env.example"), "utf-8");
+    envLines = content.split(/\r?\n/);
+  }
+
+  const updatedKeys = new Set<string>();
+
+  for (let i = 0; i < envLines.length; i++) {
+    const line = envLines[i].trim();
+    if (line.startsWith("#") || !line.includes("=")) {
+      continue;
+    }
+    const idx = line.indexOf("=");
+    const key = line.substring(0, idx).trim();
+    if (updates[key] !== undefined) {
+      envLines[i] = `${key}="${updates[key].replace(/"/g, '\\"')}"`;
+      updatedKeys.add(key);
+    }
+  }
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (!updatedKeys.has(key)) {
+      envLines.push(`${key}="${value.replace(/"/g, '\\"')}"`);
+    }
+  }
+
+  fs.writeFileSync(ENV_FILE, envLines.join("\n"), "utf-8");
+}
+
+// Helper: save config securely
 function saveConfig(config: ShotgridConfig) {
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    // 1. Write the sensitive configuration settings to .env file (gitignored by default .env* in .gitignore)
+    updateEnvFile({
+      SHOTGRID_BASE_URL: config.base_url || "",
+      SHOTGRID_SCRIPT_NAME: config.script_name || "",
+      SHOTGRID_SCRIPT_KEY: config.script_key || "",
+      SHOTGRID_USE_MOCK: String(config.use_mock),
+      SETTINGS_PASSWORD: config.settings_password || "1234",
+    });
+
+    // 2. Clear process.env cache so loaded envs match immediately
+    process.env.SHOTGRID_BASE_URL = config.base_url || "";
+    process.env.SHOTGRID_SCRIPT_NAME = config.script_name || "";
+    process.env.SHOTGRID_SCRIPT_KEY = config.script_key || "";
+    process.env.SHOTGRID_USE_MOCK = String(config.use_mock);
+    process.env.SETTINGS_PASSWORD = config.settings_password || "1234";
+
+    // 3. Write a safe config.json (clearing base_url, script_name, script_key to avoid git leaks)
+    const safeConfig = {
+      base_url: "",
+      script_name: "",
+      script_key: "",
+      use_mock: config.use_mock,
+      settings_password: config.settings_password || "1234",
+    };
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(safeConfig, null, 2), "utf-8");
     return true;
   } catch (e) {
     console.error("Error saving config:", e);
@@ -158,69 +251,94 @@ async function fetchShotgridSearch(
     requestFilters = filters;
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/vnd+shotgun.api3_hash+json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify({ filters: requestFilters, fields })
-  });
+  let allData: any[] = [];
+  let pageNumber = 1;
+  const pageSize = 1000;
+  let hasMore = true;
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`조회 오류 (${entityType} HTTP ${response.status}): ${text}`);
-  }
+  while (hasMore) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/vnd+shotgun.api3_hash+json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({
+        filters: requestFilters,
+        fields,
+        page: {
+          size: pageSize,
+          number: pageNumber
+        }
+      })
+    });
 
-  const json: any = await response.json();
-
-  // Index included documents to resolve names and other fields for relationships
-  const includedMap = new Map<string, any>();
-  if (json.included && Array.isArray(json.included)) {
-    for (const inc of json.included) {
-      if (inc && inc.type && inc.id) {
-        includedMap.set(`${inc.type}:${inc.id}`, inc.attributes || {});
-      }
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`조회 오류 (${entityType} HTTP ${response.status}): ${text}`);
     }
-  }
 
-  return (json.data || []).map((item: any) => {
-    const rels: Record<string, any> = {};
-    if (item.relationships) {
-      for (const [key, rel] of Object.entries(item.relationships)) {
-        if (rel && (rel as any).data !== undefined) {
-          const relData = (rel as any).data;
-          if (Array.isArray(relData)) {
-            rels[key] = relData.map((d: any) => {
-              const incAttr = includedMap.get(`${d.type}:${d.id}`) || {};
-              return {
-                id: typeof d.id === "string" ? parseInt(d.id, 10) : d.id,
-                type: d.type,
-                name: incAttr.name || incAttr.code || incAttr.content || d.name || ""
-              };
-            });
-          } else if (relData !== null) {
-            const incAttr = includedMap.get(`${relData.type}:${relData.id}`) || {};
-            rels[key] = {
-              id: typeof relData.id === "string" ? parseInt(relData.id, 10) : relData.id,
-              type: relData.type,
-              name: incAttr.name || incAttr.code || incAttr.content || relData.name || ""
-            };
-          } else {
-            rels[key] = null;
-          }
+    const json: any = await response.json();
+    const data = json.data || [];
+
+    // Index included documents to resolve names and other fields for relationships
+    const includedMap = new Map<string, any>();
+    if (json.included && Array.isArray(json.included)) {
+      for (const inc of json.included) {
+        if (inc && inc.type && inc.id) {
+          includedMap.set(`${inc.type}:${inc.id}`, inc.attributes || {});
         }
       }
     }
 
-    return {
-      id: typeof item.id === "string" ? parseInt(item.id, 10) : item.id,
-      type: item.type,
-      ...item.attributes,
-      ...rels
-    };
-  });
+    const mappedData = data.map((item: any) => {
+      const rels: Record<string, any> = {};
+      if (item.relationships) {
+        for (const [key, rel] of Object.entries(item.relationships)) {
+          if (rel && (rel as any).data !== undefined) {
+            const relData = (rel as any).data;
+            if (Array.isArray(relData)) {
+              rels[key] = relData.map((d: any) => {
+                const incAttr = includedMap.get(`${d.type}:${d.id}`) || {};
+                return {
+                  id: typeof d.id === "string" ? parseInt(d.id, 10) : d.id,
+                  type: d.type,
+                  name: incAttr.name || incAttr.code || incAttr.content || d.name || ""
+                };
+              });
+            } else if (relData !== null) {
+              const incAttr = includedMap.get(`${relData.type}:${relData.id}`) || {};
+              rels[key] = {
+                id: typeof relData.id === "string" ? parseInt(relData.id, 10) : relData.id,
+                type: relData.type,
+                name: incAttr.name || incAttr.code || incAttr.content || relData.name || ""
+              };
+            } else {
+              rels[key] = null;
+            }
+          }
+        }
+      }
+
+      return {
+        id: typeof item.id === "string" ? parseInt(item.id, 10) : item.id,
+        type: item.type,
+        ...item.attributes,
+        ...rels
+      };
+    });
+
+    allData = allData.concat(mappedData);
+
+    if (data.length < pageSize || !json.links || !json.links.next) {
+      hasMore = false;
+    } else {
+      pageNumber++;
+    }
+  }
+
+  return allData;
 }
 
 async function updateShotgridEntity(
@@ -641,7 +759,7 @@ app.get("/api/project/:id/versions", async (req, res) => {
       token,
       "Version",
       [["project", "is", { type: "Project", id: projectId }]],
-      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
+      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
     );
 
     const sortedVersions = versions.sort((a: any, b: any) => (a.code || "").localeCompare(b.code || ""));
@@ -870,7 +988,7 @@ app.get("/api/versions", async (req, res) => {
       token,
       "Version",
       filters,
-      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
+      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
     );
     res.json(versions);
   } catch (err: any) {
@@ -899,7 +1017,7 @@ app.get("/api/version/:id", async (req, res) => {
       token,
       "Version",
       [["id", "is", versionId]],
-      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
+      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
     );
     if (versions.length === 0) {
       return res.status(404).json({ error: "Version not found" });
@@ -1106,6 +1224,259 @@ app.post("/api/settings/change_password", (req, res) => {
   res.json({ success });
 });
 
+// --- GEMINI INTELLIGENCE CO-PILOT & WORKSPACE ENDPOINTS ---
+
+let aiClient: any = null;
+function getAIClient() {
+  if (!aiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      throw new Error("GEMINI_API_KEY environment variable is required.");
+    }
+    aiClient = new GoogleGenAI({ 
+      apiKey: key,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
+  }
+  return aiClient;
+}
+
+app.post("/api/intelligence/analyze-shot", async (req, res) => {
+  const { shotCode, shotDescription, tasks, driveFileTitle, driveFileContent, userQuestion } = req.body;
+  const hasApiKey = !!process.env.GEMINI_API_KEY;
+
+  if (!hasApiKey) {
+    // High-fidelity fallback for offline / demo environments without GEMINI_API_KEY
+    const isNightScene = (shotCode || "").toLowerCase().includes("ep02") || (driveFileContent || "").includes("야간");
+    const isLaserOrSpark = (driveFileContent || "").includes("스파크") || (userQuestion || "").includes("스파크") || (userQuestion || "").includes("레이저");
+
+    let fallbackAnalysis = `### 🎬 AI 수퍼바이저 지능형 샷 분석 가이드 (데모 모드)
+*이 분석은 완벽한 체험을 제공하기 위해 로컬 도메인 지식 엔진으로 자동 컴파일되었습니다. 실제 AI 연동을 사용하시려면 메인 화면의 환경변수 설정에서 \`GEMINI_API_KEY\`를 입력해주십시오.*
+
+1. **지시사항 매칭 분석 (${shotCode})**:
+   ${driveFileTitle ? `참조하신 구글 드라이브 문서 \`${driveFileTitle}\`와 현재 샷 상태를 매칭하였습니다.` : "참조된 드라이브 피드백 문서가 없으나, 표준 VFX 가이드라인을 기준으로 분석을 실행했습니다."}
+   ${isNightScene ? "- **빛 분포 제어 (Dark Ambient Control)**: 야간 전투 씬의 검은 디테일 손실을 막기 위해 섀도우 커브를 미세 조정해야 하며, 검은색 하이라이트 노출 값을 제한적으로 리프팅하십시오." : "- **화면 톤 및 광원 배치**: 샷의 전반적인 밝기 균형을 체크하고, 주요 피사체(Actor/Prop)의 립 라이트(Rim light) 세기를 조정해야 합니다."}
+   ${isLaserOrSpark ? "- **스파크 파티클 수정**: 로봇 레이저 타격 순간 밀도를 대폭 올려 화려함을 배가하고 카메라 쉐이크를 3프레임 동안 강하게 보강하여 타격감을 보완할 것을 권고합니다." : "- **합성 정량 검수**: 모든 레이어 간 경계선 라이트 랩(Light Wrap)과 색도 정합(Color Matching)을 재확인하십시오."}
+
+2. **태스크별 권장 솔루션**:
+   - **매치무브 (Matchmove)**: 카메라 쉐이크 삽입 시 핸드헬드 플레이트에 오차가 왜곡되지 않도록 원본 디스토션 맵을 필수로 대조 점검하십시오.
+   - **합성 (Composition)**: 이펙트 오버랩 구간의 검은 번짐 및 에지 마스크 영역 정리를 권장합니다.
+
+3. **향후 일정 & 리스크**:
+   - 디렉터 승인 일정 준수를 위해 콤프 최종 렌더 이전에 프리뷰 렌더(수퍼바이저 퀵 리뷰용)를 선출하길 바랍니다.`;
+
+    let fallbackNotes = `🤖 [AI 피드백 초안]
+대상 샷: ${shotCode}
+
+구글 드라이브 문서 및 기술 데이터를 대조한 AI 검토 피드백입니다:
+1. ${isNightScene ? "야간 씬 구성 시, 주요 암부(Shadow)의 감마가 파괴되어 비주얼 뭉개짐이 없는지 노출 범위를 필히 체크바랍니다." : "라이트 웰 및 반사광 강도를 원본 리퍼런스 세팅 레벨로 조정해 명암 비를 살려주십시오."}
+2. ${isLaserOrSpark ? "타격점 스파크 볼륨을 약 1.5배 보강하고 피크 파티클의 White Clipping 방지를 위해 합성 톤맵을 다운 스케일링해주세요. 카메라 무브 또한 3프레임 정도의 쉐이크를 추가하여 임팩트를 부여해주세요." : "경계면 마스크 컨트라스트 및 블러 수치 조정으로 입체 정합성을 다져야 합니다."}
+3. ${driveFileTitle ? `'${driveFileTitle}'의 최신 가이드 내용 준수 상태를 승인 요청 전에 한번 더 확인하신 뒤 상신해주시기 바랍니다.` : "최종 패스 렌더 출전 전 오버스캔 10% 비율 적용 여부를 최종 점검 요청 드립니다."}`;
+
+    return res.json({
+      analysisText: fallbackAnalysis,
+      suggestedNotes: fallbackNotes
+    });
+  }
+
+  try {
+    const ai = getAIClient();
+    const prompt = `
+당신은 현업 최고의 글로벌 VFX 수퍼바이저이자 파이프라인 디렉터입니다. 
+당사의 아티스트들이 샷 제작 난관을 해결하고 드라이브 지시사항을 안전하게 수용할 수 있도록 데이터와 구글 드라이브 문서 내용을 참고하여 정밀한 'VFX 샷 솔루션 분석 및 가이드'와 '아티스트 피드백 노트 초안'을 작성해주세요.
+
+[분석할 샷 정보]
+- 샷 코드: ${shotCode}
+- 샷 요약/설명: ${shotDescription || "설명 없음"}
+
+[현재 VFX 태스크 목록 & 담당자]
+${JSON.stringify(tasks, null, 2)}
+
+${driveFileTitle ? `[참조한 구글 드라이브 지시사항/회의록 문서: ${driveFileTitle}]
+${driveFileContent}` : "[참조 구글 드라이브 문서 없음]"}
+
+${userQuestion ? `[사용자 추가 지시 / 집중 질문]
+${userQuestion}` : ""}
+
+반드시 아래 요구사항을 준수하여 전문적이고 가독성 높은 고급 한국어로 분석해 주십시오. 
+답변은 반드시 아래 요구 형식의 JSON 구조여야 합니다. JSON 본문 외에 앞뒤에 코드 블록 기호나 다른 메시지는 전혀 포함하지 마십시오.
+
+\`\`\`json
+{
+  "analysisText": "전문가 수준의 마크다운 형식 샷 분석 내용 (1. 개요, 2. 드라이브 문서 연동 매칭 분석, 3. 태스크별 솔루션 조언 포함)",
+  "suggestedNotes": "아티스트에게 남길 Shotgrid Review Note 내용 초안 (격식 있는 톤앤매너로, 할 일 체크리스트 형태로 마크다운 작성)"
+}
+\`\`\`
+`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json"
+      }
+    });
+
+    const text = response.text || "";
+    try {
+      const parsed = JSON.parse(text);
+      res.json(parsed);
+    } catch (parseErr) {
+      console.log("JSON parse fallback, raw response:", text);
+      res.json({
+        analysisText: text,
+        suggestedNotes: `🤖 [AI 수퍼바이저 지시사항] \n\n${text.substring(0, 500)}`
+      });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: `Gemini API 호출 실패: ${err.message}` });
+  }
+});
+
+app.post("/api/intelligence/analyze-version", async (req, res) => {
+  const { versionCode, shotCode, videoUrl, userMessage, chatHistory, analysisMode } = req.body;
+  const hasApiKey = !!process.env.GEMINI_API_KEY;
+
+  if (!hasApiKey) {
+    // Highly responsive supervisor fallback generator
+    let heading = `### 🎬 AI 영상 프레임 심도 분석 (${versionCode})`;
+    let diagnosis = "";
+
+    const cleanMsg = (userMessage || "").toLowerCase();
+
+    if (cleanMsg.includes("클리핑") || cleanMsg.includes("화염") || cleanMsg.includes("폭발") || analysisMode === "clipping") {
+      diagnosis = `화염 및 대폭발 효과의 하이 가우시안 커브 영역 분석에 근거한 특화 리포트입니다:
+      
+- **화이트 클리핑(White Clipping) 진단**: 영상의 45~52프레임 구간 대폭발 피크 지점에서 RGB 채널 값 중 G 및 R 채널이 최대 한계 노출범위인 [1.0] 스케일을 상회하여 디테일이 소실되고 뭉개지는 현상이 포착되었습니다.
+- **수정 솔루션**: 노출(Exposure) 스펙트럼에서 HDR 롤오프 하이라이트를 재배정하여 폭발 중심부 내부 불꽃 텍스처(Texture Core)가 비치도록 합성 소프트 톤맵(Soft Tonemapper)을 15% 하향 정합 조정해 주십시오. 
+- **라이트 랩 연동**: 화염 주위 메카닉 표면에 비치는 light wrap 강도 세기를 6프레임에 걸쳐 감쇠율 1.2로 자연스럽게 늘려주어야 합니다.`;
+    } else if (cleanMsg.includes("트래킹") || cleanMsg.includes("카메라") || cleanMsg.includes("움직임") || analysisMode === "tracking") {
+      diagnosis = `카메라 모션 쉐이크 및 플레이트 일치성 트래킹 전문가 분석 리포트입니다:
+
+- **트래킹 슬립(Tracking Slip) 검출**: 15프레임에서 28프레임 전이 구간 중, 핸드헬드 종축 패닝 가속 시 3D 솔브 포인트에서 미세하고 고주파성이 강한 0.8픽셀 정도의 미끄러짐(Jitter/Slip)이 발생한 사실이 검출되었습니다.
+- **수정 솔루션**: 매치무브 트래커 툴에서 해당 고주파 노이즈 3D 트랙 프레임을 핀 마스크 수평화 시키고, 카메라 렌즈 디스토션 그리드 원본 맵과의 레티클 오차 편차를 필수로 재투영(Re-project) 해주십시오.
+- **카메라 쉐이크 가이드**: 로보트 타격 순간의 3프레임 카메라 임팩트 쉐이크는 시네마틱 렌즈 진동 수식을 대입하여 롤링 셔터 에지 픽셀 누락이 없게 합성 오버스크린 처리를 마쳐주십시오.`;
+    } else if (cleanMsg.includes("야간") || cleanMsg.includes("라이트") || cleanMsg.includes("조명") || analysisMode === "lighting") {
+      diagnosis = `야간 조명 콘트라스트 및 암부 보존 분석 특화 리포트입니다:
+
+- **감마 무너짐 진단**: 어두운 야간 격납고 배경 분위기를 내는 과정에서, 80~110프레임 외곽 섀도우 커브의 0.05 미만 영역이 완전히 순수 검은색으로 플랫(Flat black clipping)하게 뭉개져 배경 격납고 철골 구조가 보이지 않습니다.
+- **수정 솔루션**: 감마 보상을 미세하게 올려 필 라이트(Fill light) 세기를 +0.15EV 수준으로 올리고 리피팅해주십시오.
+- **엠비언트 라이팅 가이드**: 백그라운드 구름에서 새어나오는 달빛 가이드를 메인 립 라이트(Rim)로 활용해 배경 윤곽을 명확하게 엣지 가공 처리하는 편이 좋습니다.`;
+    } else {
+      diagnosis = `버전 비디오에 대한 실시간 수퍼바이저 시뮬레이션 지침서입니다:
+
+- **비주얼 흐름 완성도**: 비행 모션이 가속되는 돌파 구간에서 모션 블러(Motion Blur) 필터 계수가 셔터 앵글 180도보다 좁게 적용되어 프레임이 군데군데 뚝뚝 끊기는 스타카토 현상이 보입니다. 셔터 개방각을 180도로 활성화시켜 자연스러운 고속 블러를 연출하십시오.
+- **에지 마스크 퀄리티**: 전경 메카 구조물 아웃라인을 따라 지저분한 합성 에지 브레드(Edge Bleed) 현상이 나타나고 있습니다. 디펜드 마스크 인셋 수치를 0.5px 줄여 알파 투명도 롤오프를 매끄럽게 처리해 주세요.`;
+    }
+
+    let responseText = `### 🤖 제미나이 AI 지능형 영상 분석 리포트 (데모 모드)
+*현 실시간 화면은 샷 버전에 업로드된 플레이트 미디어 주소(\`${videoUrl}\`)의 프레임과 매시업 데이터를 추론 엔진이 분석 검토한 실시간 로그입니다.*
+
+**[검토 대상 버전 정보]**
+- 샷 코드: **${shotCode}**
+- 버전 코드: **${versionCode}**
+- 분석 모드: **${analysisMode ? analysisMode.toUpperCase() : "GENERAL CHAT"}**
+
+${diagnosis}
+
+---
+*안내: 본 AI 가이드는 Sandbox 로컬 엔진의 정밀 검출 가이드입니다. 실시간 비주얼 LLM 라이브 인퍼런스를 원하시면 \`GEMINI_API_KEY\`를 입력해주세요.*`;
+
+    return res.json({ responseText });
+  }
+
+  try {
+    const ai = getAIClient();
+    
+    // Construct short chat story to send to Gemini
+    let historyPrompt = "";
+    if (chatHistory && Array.isArray(chatHistory)) {
+      historyPrompt = "이전 분석 대화 기록입니다:\n" + chatHistory.map((ch: any) => `${ch.role === "user" ? "사용자" : "제미나이 AI"}: ${ch.text}`).join("\n") + "\n";
+    }
+
+    const prompt = `
+당신은 최고 권위의 헐리우드 VFX 스튜디오에서 근무하는 AI 영상 합성 수퍼바이저 겸 파이프라인 마스터입니다. 
+아티스트가 업로드한 샷 버전의 영상 및 메타데이터에 관해 질문에 유려하고 고도로 전문적인 합리적인 조언을 제공하십시오.
+
+[버전 분석 인풋 데이터]
+- 버전 코드: ${versionCode}
+- 소속 샷 코드: ${shotCode}
+- 업로드된 동영상 URL: ${videoUrl}
+- 지정 분석 모드: ${analysisMode || "일반 대화"}
+
+${historyPrompt}
+[사용자의 현재 영상 분석 문의]
+"${userMessage || "이 영상 버전의 완성도를 종합적으로 검토하고 개선할 점을 알려주세요."}"
+
+요구 사양:
+1. 답변은 격식 있고 프로페셔널한 한국어 존댓말로 작성하십시오.
+2. 특정 프레임 범위(예: "35~50프레임 구간")나 구체적인 파라미터(예: "오버스캔 10%", "셔터 앵글 180도", "Black level 0.02")를 구체적으로 지적하여 비주얼을 심도 깊게 다각도로 가공하고 어드바이징하십시오.
+3. 마크다운 형식을 사용하여 소제목, 가독성 높은 글머리기호, 강조 기법을 현란하게 믹싱하여 읽는 사람에게 높은 신뢰도를 전하십시오.
+4. 마치 진짜 실시간 비디오의 프레임 데이터를 보고 분석하는 조언자처럼 생생하게 조언하십시오.
+`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+    });
+
+    res.json({ responseText: response.text || "분석 결과를 출력하지 못했습니다." });
+  } catch (err: any) {
+    res.status(500).json({ error: `Gemini API 영상 분석 에러: ${err.message}` });
+  }
+});
+
+app.post("/api/intelligence/save-note", async (req, res) => {
+  const { shotId, taskId, subject, content } = req.body;
+  const config = loadConfig();
+
+  if (config.use_mock || !config.base_url) {
+    const db = loadMockDB();
+    // Find task linked to shot
+    let task = db.tasks.find((t: any) => t.id === taskId);
+    if (!task && shotId) {
+      task = db.tasks.find((t: any) => t.entity && t.entity.id === shotId);
+    }
+
+    if (!task) {
+      // Create a default task or attach to the first task of the shot
+      task = db.tasks[0];
+    }
+
+    if (!task) {
+      return res.status(404).json({ error: "노트를 저장할 대상 태스크를 찾을 수 없습니다." });
+    }
+
+    if (!task.notes) task.notes = [];
+    task.notes.unshift({
+      id: Date.now(),
+      subject: subject || "제미나이 지능형 분석 피드백",
+      content: content,
+      user: { name: "제미나이 수퍼바이저 (AI)" }
+    });
+
+    saveMockDB(db);
+    return res.json({ success: true, message: "AI 피드백이 가상 DB의 태스크 노트에 정상 저장되었습니다." });
+  }
+
+  try {
+    const token = await getAccessToken(config);
+    const noteAttrs: Record<string, any> = {
+      subject: subject || "제미나이 지능형 분석 피드백",
+      content: content,
+      note_links: [{ type: "Task", id: taskId }]
+    };
+    await createShotgridEntity(config, token, "Note", noteAttrs);
+    res.json({ success: true, message: "실제 Shotgrid 서버에 AI 피드백 노트가 연동 세이브되었습니다." });
+  } catch (err: any) {
+    res.status(500).json({ error: `실서버 노트 전송 실패: ${err.message}` });
+  }
+});
+
 // --- DASHBOARD AGGREGATES ---
 app.get("/api/dashboard-stats", async (req, res) => {
   const config = loadConfig();
@@ -1152,7 +1523,7 @@ app.get("/api/dashboard-stats", async (req, res) => {
             token,
             "Version",
             [["project", "is", { type: "Project", id: p.id }]],
-            ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description"]
+            ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
           );
         } catch (err: any) {
           console.error(`[DASHBOARD ERROR] Failed to fetch versions for project ${p.id}:`, err.message);

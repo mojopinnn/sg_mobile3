@@ -27,6 +27,8 @@ export interface Version {
   project: { id: number; name: string };
   entity?: { id: number; name: string; type: string };
   description?: string;
+  image?: string | null;
+  sg_uploaded_movie?: any;
 }
 
 export interface ParsedTask {

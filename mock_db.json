@@ -237,7 +237,8 @@
         "name": "Space_Cruiser_A",
         "type": "Asset"
       },
-      "description": "첫 번째 레이아웃 애니메이션 프리뷰 제출본입니다."
+      "description": "첫 번째 레이아웃 애니메이션 프리뷰 제출본입니다.",
+      "image": "https://picsum.photos/id/116/200/120"
     },
     {
       "id": 102,
@@ -253,7 +254,8 @@
         "name": "Shot_010",
         "type": "Shot"
       },
-      "description": "색수차 필터링 및 네온 라이팅 반사광 추가 적용 완료."
+      "description": "색수차 필터링 및 네온 라이팅 반사광 추가 적용 완료.",
+      "image": "https://picsum.photos/id/85/200/120"
     }
   ],
   "shots": [
