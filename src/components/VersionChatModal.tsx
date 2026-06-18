@@ -25,6 +25,50 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
   const [versionAnalysisMode, setVersionAnalysisMode] = useState<
     "general" | "clipping" | "tracking" | "lighting"
   >("general");
+  const [viewportStyle, setViewportStyle] = useState<React.CSSProperties>({});
+
+  // Dynamically calculate style to adapt perfectly to mobile visual viewport (virtual keyboards)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleResize = () => {
+      const vv = window.visualViewport;
+      if (vv) {
+        if (window.innerWidth < 640) {
+          // On mobile, pin the modal's outer boundary to the exact visual viewport bounds
+          setViewportStyle({
+            position: "fixed",
+            top: `${vv.offsetTop}px`,
+            left: `${vv.offsetLeft}px`,
+            width: `${vv.width}px`,
+            height: `${vv.height}px`,
+          });
+        } else {
+          setViewportStyle({});
+        }
+      } else {
+        setViewportStyle({});
+      }
+    };
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", handleResize);
+      window.visualViewport.addEventListener("scroll", handleResize);
+    }
+    window.addEventListener("resize", handleResize);
+    handleResize();
+
+    const fallbackTimer = setTimeout(handleResize, 300);
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", handleResize);
+        window.visualViewport.removeEventListener("scroll", handleResize);
+      }
+      window.removeEventListener("resize", handleResize);
+      clearTimeout(fallbackTimer);
+    };
+  }, []);
 
   // Welcome message on load
   useEffect(() => {
@@ -83,10 +127,24 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
           userMessage: userMsg,
           chatHistory: formattedHistory,
           analysisMode: versionAnalysisMode,
+          shotDescription: matchedShot?.description || "",
+          shotWorkOrder: matchedShot?.sg_work_order || "",
+          versionDescription: version.description || "",
         }),
       });
 
-      if (!res.ok) throw new Error("분석 서버와 원활하게 연결되지 않았습니다.");
+      if (!res.ok) {
+        let errMsg = "분석 서버와 원활하게 연결되지 않았습니다.";
+        try {
+          const errData = await res.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          } else if (errData && errData.message) {
+            errMsg = errData.message;
+          }
+        } catch (_) {}
+        throw new Error(errMsg);
+      }
       const data = await res.json();
 
       const geminiBubble = {
@@ -108,8 +166,13 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
-      <div className="bg-white border border-stone-200 rounded-3xl p-5 md:p-6 shadow-2xl relative w-full max-w-2xl flex flex-col h-[640px] max-h-[90vh]">
+    <div 
+      style={viewportStyle}
+      className="fixed inset-0 z-50 flex sm:items-center justify-center sm:p-4 bg-black/70 backdrop-blur-sm animate-fade-in"
+    >
+      <div
+        className="bg-white border-0 sm:border border-stone-200 rounded-none sm:rounded-3xl p-4 sm:p-6 shadow-2xl relative w-full sm:max-w-[95vw] lg:max-w-6xl xl:max-w-7xl flex flex-col h-full sm:h-[85vh] sm:max-h-[850px] max-h-full"
+      >
         {/* Header */}
         <div className="flex justify-between items-start border-b border-stone-150 pb-4 mb-4 shrink-0">
           <div className="flex items-center space-x-3">
@@ -123,9 +186,19 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
                   gemini-3.5-flash
                 </span>
               </div>
-              <p className="text-[10px] text-stone-400 font-bold mt-1">
-                버전: {version.code} • 샷 디폴트 프리뷰
-              </p>
+              <div className="text-[10px] text-stone-400 font-bold mt-1 flex items-center gap-1.5 flex-wrap">
+                <span>버전: {version.code}</span>
+                <span className="text-stone-300">•</span>
+                <button
+                  type="button"
+                  onClick={() => handlePlayVersionVideo(version)}
+                  className="text-indigo-600 hover:text-indigo-800 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  title="미디어 플레이어로 시점 전환"
+                >
+                  <PlayCircle className="w-3.5 h-3.5 inline" />
+                  <span>미디어 플레이어 재생</span>
+                </button>
+              </div>
             </div>
           </div>
           <button
@@ -137,96 +210,6 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
           </button>
         </div>
 
-        {/* Quick Informative Panel & Mini Video Preview Row */}
-        <div className="bg-stone-50 border border-stone-150 rounded-2xl p-3 mb-4 shrink-0 flex items-center justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            <span className="text-[9px] font-black text-stone-400 uppercase tracking-widest block">
-              SELECTED PLAYBACK PLAYER
-            </span>
-            <span className="text-xs font-black text-stone-800 block truncate">{version.code}</span>
-            <span className="text-[9px] text-stone-500 block truncate mt-0.5 max-w-sm">
-              URL: {getVersionVideoUrl(version)}
-            </span>
-          </div>
-          <div
-            onClick={() => handlePlayVersionVideo(version)}
-            className="w-24 h-14 bg-black rounded-xl border border-stone-200 flex items-center justify-center overflow-hidden flex-shrink-0 relative shadow group cursor-pointer hover:border-blue-400 transition"
-            title="미디어 플레이어로 시점 전환"
-          >
-            {version.image ? (
-              <>
-                <img
-                  src={version.image}
-                  alt={version.code}
-                  className="object-cover w-full h-full group-hover:scale-105 transition"
-                  referrerPolicy="no-referrer"
-                />
-                <div className="absolute inset-0 bg-black/10 group-hover:bg-black/30 flex items-center justify-center transition">
-                  <PlayCircle className="w-5 h-5 text-white/90 drop-shadow-md" />
-                </div>
-              </>
-            ) : (
-              <PlayCircle className="w-5 h-5 text-indigo-400" />
-            )}
-          </div>
-        </div>
-
-        {/* Analysis Mode Category Selection Chips */}
-        <div className="mb-4 shrink-0">
-          <label className="block text-[9.5px] font-black text-stone-400 uppercase tracking-wider mb-2">
-            분석 정합 초점 변경 (SET AI DIAGNOSIS MODE)
-          </label>
-          <div className="flex flex-wrap gap-1.5">
-            {[
-              { mode: "general" as const, label: "종합 비주얼 코칭", desc: "전체 렌더 밸런스 검수" },
-              { mode: "clipping" as const, label: "화이트 클리핑 진단", desc: "폭발/이펙트 노출 체크" },
-              { mode: "tracking" as const, label: "카메라 트래킹 연동", desc: "3D 솔브 일치 오차 분석" },
-              { mode: "lighting" as const, label: "야간 조명 최적화", desc: "암부 노출 소실 검토" },
-            ].map((item) => {
-              const isActive = versionAnalysisMode === item.mode;
-              return (
-                <button
-                  key={item.mode}
-                  type="button"
-                  onClick={() => {
-                    setVersionAnalysisMode(item.mode);
-                    // Apply quick automatic assistant template
-                    let promptText = "";
-                    if (item.mode === "clipping") {
-                      promptText =
-                        "이 버전 영상의 불꽃 및 광량 폭발 구간에 화이트 클리핑이 생기어 텍스처 디테일이 뭉개지거나 날라가는지 전용 진단을 돌려서 노펙 커브 수정안을 제안해주세요.";
-                    } else if (item.mode === "tracking") {
-                      promptText =
-                        "매치무브와 카메라 핸드헬드 플레이트 상에서 모션 포인트 밀림(Tracking slip)이 있는지 분석해 타격 시 쉐이크 보강 솔루션을 조언해 주십시오.";
-                    } else if (item.mode === "lighting") {
-                      promptText =
-                        "야간 전투 배경 씬의 조도 대치 상황에서 아티스트 감마 블랙 레벨이 완전히 뭉개져 묻히지 않도록 최적 가중 조명 제어를 제시해주세요.";
-                    } else {
-                      promptText =
-                        "이 버전 영상의 콤프 슛 경계면 완만화 에지 마크 랩(light wrap)과 종합 비주얼 합성 품질에 완성도를 체크리스트 요약과 함께 종합 조언 바랍니다.";
-                    }
-                    setCurrentVersionMessage(promptText);
-                  }}
-                  className={`text-left px-3 py-2 rounded-xl border transition cursor-pointer flex-1 min-w-[120px] ${
-                    isActive
-                      ? "bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-100"
-                      : "bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100"
-                  }`}
-                >
-                  <p className="text-[10px] font-black uppercase leading-tight">{item.label}</p>
-                  <span
-                    className={`text-[8px] font-medium leading-none block whitespace-nowrap overflow-hidden text-ellipsis ${
-                      isActive ? "text-indigo-100" : "text-stone-400"
-                    }`}
-                  >
-                    {item.desc}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
         {/* Chat Area */}
         <div className="flex-1 overflow-y-auto bg-stone-50 border border-stone-150 rounded-2xl p-4 mb-4 space-y-3 flex flex-col-reverse">
           <div className="space-y-3 flex flex-col justify-end min-h-full">
@@ -235,12 +218,12 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
               return (
                 <div
                   key={idx}
-                  className={`flex flex-col max-w-[85%] ${
+                  className={`flex flex-col max-w-[96%] ${
                     isUser ? "ml-auto items-end" : "mr-auto items-start animate-fade-in"
                   }`}
                 >
                   <div
-                    className={`p-3 rounded-2xl text-[11px] leading-relaxed select-text shadow-sm ${
+                    className={`p-4 rounded-2xl text-[18px] leading-relaxed select-text shadow-sm ${
                       isUser
                         ? "bg-indigo-600 text-white rounded-br-none"
                         : "bg-white border border-stone-200 text-stone-800 rounded-bl-none"
@@ -249,14 +232,14 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
                     {isUser ? (
                       <p className="whitespace-pre-wrap font-sans font-bold">{msg.text}</p>
                     ) : (
-                      <div className="whitespace-pre-wrap font-sans space-y-1 prose prose-stone max-w-none">
+                      <div className="whitespace-pre-wrap font-sans space-y-1.5 prose prose-stone max-w-none">
                         {/* Simple inline robust markdown headers rendering */}
                         {msg.text.split("\n").map((line, lIdx) => {
                           if (line.startsWith("### ")) {
                             return (
                               <h4
                                 key={lIdx}
-                                className="text-stone-950 font-black text-xs pt-1.5 pb-0.5 border-b border-indigo-100"
+                                className="text-stone-950 font-black text-[20px] pt-2.5 pb-1 border-b-2 border-indigo-100"
                               >
                                 {line.replace("### ", "")}
                               </h4>
@@ -264,21 +247,21 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
                           }
                           if (line.startsWith("**") && line.endsWith("**")) {
                             return (
-                              <p key={lIdx} className="text-stone-900 font-extrabold">
+                              <p key={lIdx} className="text-stone-900 font-black text-[19px]">
                                 {line.replace(/\*\*/g, "")}
                               </p>
                             );
                           }
                           if (line.startsWith("- ")) {
                             return (
-                              <div key={lIdx} className="flex items-start text-stone-850 pl-1.5">
+                              <div key={lIdx} className="flex items-start text-stone-850 pl-1.5 text-[18px]">
                                 <span className="text-indigo-500 mr-1.5 shrink-0">•</span>
                                 <span>{line.replace("- ", "")}</span>
                               </div>
                             );
                           }
                           return (
-                            <p key={lIdx} className="text-stone-700 min-h-[0.5rem] leading-normal">
+                            <p key={lIdx} className="text-stone-700 min-h-[0.5rem] leading-normal text-[18px]">
                               {line}
                             </p>
                           );
@@ -286,7 +269,7 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
                       </div>
                     )}
                   </div>
-                  <span className="text-[8px] font-bold text-stone-400 mt-1 uppercase tracking-widest font-mono">
+                  <span className="text-[11px] font-bold text-stone-400 mt-1.5 uppercase tracking-widest font-mono">
                     {isUser ? "You" : "Gemini AI"} • {msg.timestamp}
                   </span>
                 </div>
@@ -294,10 +277,10 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
             })}
 
             {isVersionChatLoading && (
-              <div className="flex flex-col items-start mr-auto max-w-[85%] animate-pulse">
-                <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-2xl rounded-bl-none text-[11px] text-indigo-800 font-bold flex items-center space-x-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-                  <span>제미나이 비전 엔진이 비디오의 공정 정보를 지능 프레임 대조 점검 중입니다...</span>
+              <div className="flex flex-col items-start mr-auto max-w-[96%] animate-pulse">
+                <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-2xl rounded-bl-none text-[16px] text-indigo-800 font-bold flex items-center space-x-2.5">
+                  <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+                  <span>제미나이 AI가 비디오 영상의 비주얼을 시각 분석 중입니다...</span>
                 </div>
               </div>
             )}
@@ -317,17 +300,17 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
               <input
                 type="text"
                 disabled={isVersionChatLoading}
-                placeholder="해당 영상에 대해 피드백할 수정을 제미나이에게 물어보세요... (프레임 단위 점검)"
+                placeholder="해당 영상에 대해 필요한 피드백이나 질문을 입력하세요..."
                 value={currentVersionMessage}
                 onChange={(e) => setCurrentVersionMessage(e.target.value)}
-                className="w-full bg-stone-50 border border-stone-200 hover:border-stone-300 rounded-2xl pl-4 pr-12 py-3.5 text-xs text-stone-800 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition"
+                className="w-full bg-stone-50 border border-stone-200 hover:border-stone-300 rounded-2xl pl-4 pr-14 py-4 text-[18px] text-stone-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition"
               />
               <button
                 type="submit"
                 disabled={isVersionChatLoading || !currentVersionMessage.trim()}
-                className="absolute right-2.5 top-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-stone-200 text-white disabled:text-stone-400 rounded-xl p-2 transition cursor-pointer"
+                className="absolute right-2 top-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-stone-200 text-white disabled:text-stone-400 rounded-xl p-2.5 transition cursor-pointer"
               >
-                <Send className="w-3.5 h-3.5" />
+                <Send className="w-4.5 h-4.5" />
               </button>
             </div>
           </form>

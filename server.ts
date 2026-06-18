@@ -1245,6 +1245,81 @@ function getAIClient() {
   return aiClient;
 }
 
+async function fetchVideoAsBase64(url: string, maxBytes = 15 * 1024 * 1024): Promise<{ data: string; mimeType: string } | null> {
+  try {
+    console.log(`[Video Downloader] Fetching video for Gemini from: ${url}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+      }
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.warn(`[Video Downloader] Failed to fetch video, status code: ${response.status}`);
+      return null;
+    }
+
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > maxBytes) {
+      console.warn(`[Video Downloader] Video exceeds limit of ${maxBytes} bytes: ${contentLength} bytes`);
+      return null;
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      console.warn(`[Video Downloader] Downloaded video buffer is too large: ${buffer.byteLength} bytes`);
+      return null;
+    }
+
+    const base64 = Buffer.from(buffer).toString('base64');
+    
+    // Deduce mimeType of the video
+    let mimeType = 'video/mp4';
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.includes('.webm')) mimeType = 'video/webm';
+    else if (lowerUrl.includes('.mov')) mimeType = 'video/quicktime';
+    else if (lowerUrl.includes('.avi')) mimeType = 'video/x-msvideo';
+
+    console.log(`[Video Downloader] Successfully downloaded and base64 encoded video. Size: ${buffer.byteLength} bytes, MIME: ${mimeType}`);
+    return { data: base64, mimeType };
+  } catch (err: any) {
+    console.warn(`[Video Downloader] Error fetching video from ${url}:`, err.message || err);
+    return null;
+  }
+}
+
+async function generateContentWithFallback(ai: any, options: { contents: any, config?: any }) {
+  const models = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+  let lastError: any = null;
+
+  for (const model of models) {
+    try {
+      console.log(`[Gemini API] Requesting model: ${model}...`);
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: options.contents,
+        config: options.config,
+      });
+      console.log(`[Gemini API] Success using model: ${model}`);
+      return response;
+    } catch (err: any) {
+      console.warn(`[Gemini API] Failed with model ${model}: ${err.message || err}. Trying next...`);
+      lastError = err;
+      
+      // If it's an API key auth or validation error, don't try other models - fail early
+      if (err.status === 403 || err.status === 400 || (err.message && (err.message.includes("API key") || err.message.includes("INVALID_ARGUMENT")))) {
+        throw err;
+      }
+    }
+  }
+  throw lastError || new Error("All fallback models failed.");
+}
+
 app.post("/api/intelligence/analyze-shot", async (req, res) => {
   const { shotCode, shotDescription, tasks, driveFileTitle, driveFileContent, userQuestion } = req.body;
   const hasApiKey = !!process.env.GEMINI_API_KEY;
@@ -1313,8 +1388,7 @@ ${userQuestion}` : ""}
 \`\`\`
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithFallback(ai, {
       contents: prompt,
       config: {
         responseMimeType: "application/json"
@@ -1338,7 +1412,7 @@ ${userQuestion}` : ""}
 });
 
 app.post("/api/intelligence/analyze-version", async (req, res) => {
-  const { versionCode, shotCode, videoUrl, userMessage, chatHistory, analysisMode } = req.body;
+  const { versionCode, shotCode, videoUrl, userMessage, chatHistory, analysisMode, shotDescription, shotWorkOrder, versionDescription } = req.body;
   const hasApiKey = !!process.env.GEMINI_API_KEY;
 
   if (!hasApiKey) {
@@ -1398,15 +1472,25 @@ ${diagnosis}
       historyPrompt = "이전 분석 대화 기록입니다:\n" + chatHistory.map((ch: any) => `${ch.role === "user" ? "사용자" : "제미나이 AI"}: ${ch.text}`).join("\n") + "\n";
     }
 
+    // Clean the video URL to avoid flooding Gemini with long AWS S3 pre-signed credential parameter strings
+    const cleanVideoUrl = videoUrl ? videoUrl.split('?')[0] : "";
+
     const prompt = `
 당신은 최고 권위의 헐리우드 VFX 스튜디오에서 근무하는 AI 영상 합성 수퍼바이저 겸 파이프라인 마스터입니다. 
 아티스트가 업로드한 샷 버전의 영상 및 메타데이터에 관해 질문에 유려하고 고도로 전문적인 합리적인 조언을 제공하십시오.
 
 [버전 분석 인풋 데이터]
-- 버전 코드: ${versionCode}
 - 소속 샷 코드: ${shotCode}
-- 업로드된 동영상 URL: ${videoUrl}
+- 버전 코드: ${versionCode}
+- 업로드된 동영상 URL: ${cleanVideoUrl}
 - 지정 분석 모드: ${analysisMode || "일반 대화"}
+
+[VFX 작업 기획 및 지침 메타데이터]
+- 이 샷의 기획 설명 (Shot Description): ${shotDescription || "지정된 설명이 없습니다."}
+- 샷 합성 작업 및 효과 가이드라인 (Shot Work Order): ${shotWorkOrder || "별도의 작업 요청서가 기록되지 않았습니다."}
+- 이번 버전에 작성된 아티스트 코멘트 (Version Description): ${versionDescription || "별도의 코멘트가 없습니다."}
+
+참고: 뒤에 이어질 [사용자의 현재 영상 분석 문의]에 답을 하되, 위에 제공된 **[VFX 작업 기획 및 지침 메타데이터]**의 내용을 최우선적인 비주얼 진실 및 절대적 컨텍스트(Absolute Truth)로 삼아 해석과 비주얼 합성 코칭을 연계하십시오.
 
 ${historyPrompt}
 [사용자의 현재 영상 분석 문의]
@@ -1414,13 +1498,12 @@ ${historyPrompt}
 
 요구 사양:
 1. 답변은 격식 있고 프로페셔널한 한국어 존댓말로 작성하십시오.
-2. 특정 프레임 범위(예: "35~50프레임 구간")나 구체적인 파라미터(예: "오버스캔 10%", "셔터 앵글 180도", "Black level 0.02")를 구체적으로 지적하여 비주얼을 심도 깊게 다각도로 가공하고 어드바이징하십시오.
-3. 마크다운 형식을 사용하여 소제목, 가독성 높은 글머리기호, 강조 기법을 현란하게 믹싱하여 읽는 사람에게 높은 신뢰도를 전하십시오.
-4. 마치 진짜 실시간 비디오의 프레임 데이터를 보고 분석하는 조언자처럼 생생하게 조언하십시오.
+2. 만약 전달된 실제 비디오 영상 분석이 가능한 경우, 실제 비디오의 비주얼 특징 및 요소(빛, 입자, 움직임 등)를 정교하게 짚어가며 기술적으로 코칭하십시오.
+3. 특정 프레임 범위(예: "35~50프레임 구간")나 구체적인 파라미터(예: "오버스캔 10%", "셔터 앵글 180도", "Black level 0.02")를 구체적으로 지적하여 비주얼을 심도 깊게 다각도로 가공하고 어드바이징하십시오.
+4. 마크다운 형식을 사용하여 소제목, 가독성 높은 글머리기호, 강조 기법을 가미하여 읽는 사람에게 높은 신뢰도를 전하십시오.
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateContentWithFallback(ai, {
       contents: prompt,
     });
 
