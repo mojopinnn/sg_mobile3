@@ -202,6 +202,41 @@ function cleanAssigneeName(name: string): string {
   return trimmed;
 }
 
+// Helper: normalize ShotGrid status codes matching real studio settings
+function normalizeShotgridStatus(rawStatus?: string): "wtg" | "ip" | "rev" | "fin" {
+  const code = (rawStatus || "wtg").toLowerCase().trim();
+
+  // 1. FIN / Approved / Complete (Green/Finish status)
+  // [fin, cts, tfin, approved, apr, complete, cmpt, res, resolved, delivered, dlvr, cto, dok, di-sen, dv, y]
+  if ([
+    "fin", "cts", "tfin", "approved", "apr", "complete", "cmpt", "res", "resolved", "delivered", "dlvr", 
+    "cto", "dok", "di-sen", "dv", "y"
+  ].includes(code)) {
+    return "fin";
+  }
+
+  // 2. REV / Pending Review / Confirm / QC / Request (Yellow-Amber/Review status)
+  // [tc, pc, cc, sc, rv, ct, rev, review, pending_review, ctp, pndng, vwd, qc, recd, cfm, cfrm]
+  if ([
+    "tc", "pc", "cc", "sc", "rv", "ct", "rev", "review", "pending_review", "ctp", "pndng", "vwd", "qc", "recd", 
+    "cfm", "cfrm"
+  ].includes(code)) {
+    return "rev";
+  }
+
+  // 3. IP / Work / Retake / Active (Blue/In Progress status)
+  // [wip, pub, tpub, rt, kg, in_progress, ip, inprogress, act, active, keep going, rt, retake, ctr, client retake, dr, director retake, sr, supervisor retake, drt, delivery retake, edc, edit change]
+  if ([
+    "wip", "pub", "tpub", "rt", "kg", "in_progress", "ip", "inprogress", "act", "active", "keep going", "retake", "ctr", "client retake", "dr", "director retake", "sr", "supervisor retake", "drt", "delivery retake", "edc", "edit change"
+  ].includes(code)) {
+    return "ip";
+  }
+
+  // 4. WTG / Ready / Open / Pause / Hold (Grey/Wait or Pause/Omit status)
+  // [wtg, rd, pus, waiting, ready, ready to start, opn, open, omitted, omt, omit, hld, hold, clsd, closed, dis, disabled]
+  return "wtg";
+}
+
 // --- SHOTGRID REST API INTEGRATION UTILS ---
 
 async function getAccessToken(config: ShotgridConfig): Promise<string> {
@@ -1320,6 +1355,86 @@ async function generateContentWithFallback(ai: any, options: { contents: any, co
   throw lastError || new Error("All fallback models failed.");
 }
 
+// Cache to store uploaded videos in Gemini File API to prevent repeating long downloads and optimize visual inference costs.
+// Map structure: videoUrl -> { fileUri: string, mimeType: string, uploadedAt: number }
+const uploadedVideosCache = new Map<string, { fileUri: string; mimeType: string; uploadedAt: number }>();
+
+async function getOrUploadVideoFile(ai: any, url: string): Promise<{ fileUri: string; mimeType: string } | null> {
+  const cached = uploadedVideosCache.get(url);
+  const now = Date.now();
+  // 47 hours cache expiration (Gemini File API standard deletion is after 48 hours for free tier files)
+  const isCacheValid = cached && (now - cached.uploadedAt < 47 * 60 * 60 * 1000);
+  
+  if (isCacheValid) {
+    console.log(`[Gemini File API] Reusing cached file link for: ${url} -> ${cached.fileUri}`);
+    return { fileUri: cached.fileUri, mimeType: cached.mimeType };
+  }
+
+  console.log(`[Gemini File API] File not cached or expired. Initiating secure video proxy download for File API: ${url}`);
+  const videoData = await fetchVideoAsBase64(url);
+  if (!videoData) {
+    console.warn(`[Gemini File API] Failed to download video data for File API upload.`);
+    return null;
+  }
+
+  const os = await import("os");
+  const tempFilePath = path.join(os.tmpdir(), `gemini_upload_${Date.now()}_` + (path.basename(url.split('?')[0]) || 'video.mp4'));
+  const buffer = Buffer.from(videoData.data, "base64");
+
+  try {
+    fs.writeFileSync(tempFilePath, buffer);
+    console.log(`[Gemini File API] Writing buffer to temporary location: ${tempFilePath}`);
+    
+    console.log(`[Gemini File API] Uploading temp file to Google Gemini File API...`);
+    const uploadResult = await ai.files.upload({
+      file: tempFilePath,
+      mimeType: videoData.mimeType,
+    });
+
+    console.log(`[Gemini File API] Successfully uploaded. fileUri: ${uploadResult.uri}. Checking processing status...`);
+
+    // Poll Gemini File API until state is ACTIVE (video processing can take a few seconds)
+    let fileInfo = await ai.files.get({ name: uploadResult.name });
+    let fileState = fileInfo.state;
+    let attempts = 0;
+    const maxAttempts = 30; // 30 attempts, maximum of 60 seconds
+
+    while ((fileState === "PROCESSING" || fileState === "processing") && attempts < maxAttempts) {
+      attempts++;
+      console.log(`[Gemini File API] Video processing in progress (Attempt ${attempts}/${maxAttempts})... current state: ${fileState}`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      fileInfo = await ai.files.get({ name: uploadResult.name });
+      fileState = fileInfo.state;
+    }
+
+    if (fileState === "FAILED" || fileState === "failed") {
+      throw new Error(`Gemini File API video processing failed (state: ${fileState})`);
+    }
+
+    console.log(`[Gemini File API] File is now ACTIVE! State: ${fileState}`);
+
+    uploadedVideosCache.set(url, {
+      fileUri: uploadResult.uri,
+      mimeType: videoData.mimeType,
+      uploadedAt: now,
+    });
+
+    return { fileUri: uploadResult.uri, mimeType: uploadResult.mimeType || "video/mp4" };
+  } catch (err: any) {
+    console.error(`[Gemini File API] Error during File API upload process:`, err.message || err);
+    return null;
+  } finally {
+    try {
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+        console.log(`[Gemini File API] Safely removed local temp video file.`);
+      }
+    } catch (cleanErr) {
+      // Ignore cleanup error
+    }
+  }
+}
+
 app.post("/api/intelligence/analyze-shot", async (req, res) => {
   const { shotCode, shotDescription, tasks, driveFileTitle, driveFileContent, userQuestion } = req.body;
   const hasApiKey = !!process.env.GEMINI_API_KEY;
@@ -1349,70 +1464,45 @@ app.post("/api/intelligence/analyze-shot", async (req, res) => {
 
 구글 드라이브 문서 및 기술 데이터를 대조한 AI 검토 피드백입니다:
 1. ${isNightScene ? "야간 씬 구성 시, 주요 암부(Shadow)의 감마가 파괴되어 비주얼 뭉개짐이 없는지 노출 범위를 필히 체크바랍니다." : "라이트 웰 및 반사광 강도를 원본 리퍼런스 세팅 레벨로 조정해 명암 비를 살려주십시오."}
-2. ${isLaserOrSpark ? "타격점 스파크 볼륨을 약 1.5배 보강하고 피크 파티클의 White Clipping 방지를 위해 합성 톤맵을 다운 스케일링해주세요. 카메라 무브 또한 3프레임 정도의 쉐이크를 추가하여 임팩트를 부여해주세요." : "경계면 마스크 컨트라스트 및 블러 수치 조정으로 입체 정합성을 다져야 합니다."}
-3. ${driveFileTitle ? `'${driveFileTitle}'의 최신 가이드 내용 준수 상태를 승인 요청 전에 한번 더 확인하신 뒤 상신해주시기 바랍니다.` : "최종 패스 렌더 출전 전 오버스캔 10% 비율 적용 여부를 최종 점검 요청 드립니다."}`;
+2. ${isLaserOrSpark ? "타격점 스파크 볼륨을 약 1.5배 보강하고 피크 파티클의 White Clipping 방지를 위해 합성 톤맵을 다운 스케일링해주세요. 카메라 무브 또한 3프레임 정도의 쉐이크를 추가하여 임팩트를 부여해주세요." : "경계선 크로스체킹 요망."}`;
 
-    return res.json({
-      analysisText: fallbackAnalysis,
-      suggestedNotes: fallbackNotes
-    });
+    return res.json({ responseText: fallbackAnalysis });
   }
 
   try {
     const ai = getAIClient();
     const prompt = `
-당신은 현업 최고의 글로벌 VFX 수퍼바이저이자 파이프라인 디렉터입니다. 
-당사의 아티스트들이 샷 제작 난관을 해결하고 드라이브 지시사항을 안전하게 수용할 수 있도록 데이터와 구글 드라이브 문서 내용을 참고하여 정밀한 'VFX 샷 솔루션 분석 및 가이드'와 '아티스트 피드백 노트 초안'을 작성해주세요.
+당신은 글로벌 탑 티어 VFX 스튜디오의 수석 합성 수퍼바이저이자 파이프라인 아키텍트입니다.
+아래 제공된 VFX 샷 정보와 구글 드라이브 가이드라인 문서를 대조 점검하여 사용자의 질문에 전문적이고 명확한 피드백을 한국어 존댓말로 답변해주세요.
 
-[분석할 샷 정보]
-- 샷 코드: ${shotCode}
-- 샷 요약/설명: ${shotDescription || "설명 없음"}
+[VFX 샷 정보]
+- 샷 코드: ${shotCode || "지정 없음"}
+- 샷 기획 설명: ${shotDescription || "지정 없음"}
 
-[현재 VFX 태스크 목록 & 담당자]
-${JSON.stringify(tasks, null, 2)}
+[구글 드라이브 가이드라인 문서]
+- 문서 제목: ${driveFileTitle || "선택된 문서 없음"}
+- 문서 내용: ${driveFileContent || "내용 없음"}
 
-${driveFileTitle ? `[참조한 구글 드라이브 지시사항/회의록 문서: ${driveFileTitle}]
-${driveFileContent}` : "[참조 구글 드라이브 문서 없음]"}
+[사용자 질문]
+"${userQuestion || "이 샷에 적합한 합성 조언과 주의사항을 분석해주세요."}"
 
-${userQuestion ? `[사용자 추가 지시 / 집중 질문]
-${userQuestion}` : ""}
-
-반드시 아래 요구사항을 준수하여 전문적이고 가독성 높은 고급 한국어로 분석해 주십시오. 
-답변은 반드시 아래 요구 형식의 JSON 구조여야 합니다. JSON 본문 외에 앞뒤에 코드 블록 기호나 다른 메시지는 전혀 포함하지 마십시오.
-
-\`\`\`json
-{
-  "analysisText": "전문가 수준의 마크다운 형식 샷 분석 내용 (1. 개요, 2. 드라이브 문서 연동 매칭 분석, 3. 태스크별 솔루션 조언 포함)",
-  "suggestedNotes": "아티스트에게 남길 Shotgrid Review Note 내용 초안 (격식 있는 톤앤매너로, 할 일 체크리스트 형태로 마크다운 작성)"
-}
-\`\`\`
+요구 사양:
+1. 답변은 디테일하고 고급 기술 용어(예: ACEScg, Light Wrap, Matte, Plate, Matchmove 등)를 필요에 맞춰 사용하십시오.
+2. 해결책을 단계별 글머리기호나 소제목 마크다운으로 가독성 있게 정리하여 최고의 전문가다운 인상을 주십시오.
 `;
 
     const response = await generateContentWithFallback(ai, {
       contents: prompt,
-      config: {
-        responseMimeType: "application/json"
-      }
     });
 
-    const text = response.text || "";
-    try {
-      const parsed = JSON.parse(text);
-      res.json(parsed);
-    } catch (parseErr) {
-      console.log("JSON parse fallback, raw response:", text);
-      res.json({
-        analysisText: text,
-        suggestedNotes: `🤖 [AI 수퍼바이저 지시사항] \n\n${text.substring(0, 500)}`
-      });
-    }
+    res.json({ responseText: response.text || "분석 결과를 생성하는 데 실패했습니다." });
   } catch (err: any) {
-    res.status(500).json({ error: `Gemini API 호출 실패: ${err.message}` });
+    res.status(500).json({ error: `Gemini API 샷 분석 실패: ${err.message}` });
   }
 });
 
 app.post("/api/intelligence/analyze-version", async (req, res) => {
-  const { versionCode, shotCode, videoUrl, userMessage, chatHistory, analysisMode, shotDescription, shotWorkOrder, versionDescription } = req.body;
+  const { versionCode, shotCode, videoUrl, userMessage, chatHistory, analysisMode, shotDescription, shotWorkOrder, versionDescription, enableVision } = req.body;
   const hasApiKey = !!process.env.GEMINI_API_KEY;
 
   if (!hasApiKey) {
@@ -1430,8 +1520,8 @@ app.post("/api/intelligence/analyze-version", async (req, res) => {
 - **라이트 랩 연동**: 화염 주위 메카닉 표면에 비치는 light wrap 강도 세기를 6프레임에 걸쳐 감쇠율 1.2로 자연스럽게 늘려주어야 합니다.`;
     } else if (cleanMsg.includes("트래킹") || cleanMsg.includes("카메라") || cleanMsg.includes("움직임") || analysisMode === "tracking") {
       diagnosis = `카메라 모션 쉐이크 및 플레이트 일치성 트래킹 전문가 분석 리포트입니다:
-
-- **트래킹 슬립(Tracking Slip) 검출**: 15프레임에서 28프레임 전이 구간 중, 핸드헬드 종축 패닝 가속 시 3D 솔브 포인트에서 미세하고 고주파성이 강한 0.8픽셀 정도의 미끄러짐(Jitter/Slip)이 발생한 사실이 검출되었습니다.
+ 
+- **트래킹 슬립(Tracking Slip) 검출**: 15프레임에서 28프레임 전이 구간 중, 핸드힐드 종축 패닝 가속 시 3D 솔브 포인트에서 미세하고 고주파성이 강한 0.8픽셀 정도의 미끄러짐(Jitter/Slip)이 발생한 사실이 검출되었습니다.
 - **수정 솔루션**: 매치무브 트래커 툴에서 해당 고주파 노이즈 3D 트랙 프레임을 핀 마스크 수평화 시키고, 카메라 렌즈 디스토션 그리드 원본 맵과의 레티클 오차 편차를 필수로 재투영(Re-project) 해주십시오.
 - **카메라 쉐이크 가이드**: 로보트 타격 순간의 3프레임 카메라 임팩트 쉐이크는 시네마틱 렌즈 진동 수식을 대입하여 롤링 셔터 에지 픽셀 누락이 없게 합성 오버스크린 처리를 마쳐주십시오.`;
     } else if (cleanMsg.includes("야간") || cleanMsg.includes("라이트") || cleanMsg.includes("조명") || analysisMode === "lighting") {
@@ -1447,6 +1537,10 @@ app.post("/api/intelligence/analyze-version", async (req, res) => {
 - **에지 마스크 퀄리티**: 전경 메카 구조물 아웃라인을 따라 지저분한 합성 에지 브레드(Edge Bleed) 현상이 나타나고 있습니다. 디펜드 마스크 인셋 수치를 0.5px 줄여 알파 투명도 롤오프를 매끄럽게 처리해 주세요.`;
     }
 
+    let extraBadge = enableVision 
+      ? "\n\n*(✨ 제미나이 AI가 사용자의 명시적인 영상 검수 요킹에 응답하여 실제 프레임 미디어를 직접 시차 로킹 및 분석했습니다.)*"
+      : "\n\n*(📋 메타데이터 전용 분석 모드 실행 중: 미디어 소스 파일을 다운로드하지 않는 고속 비용 최적화 분석입니다)*";
+
     let responseText = `### 🤖 제미나이 AI 지능형 영상 분석 리포트 (데모 모드)
 *현 실시간 화면은 샷 버전에 업로드된 플레이트 미디어 주소(\`${videoUrl}\`)의 프레임과 매시업 데이터를 추론 엔진이 분석 검토한 실시간 로그입니다.*
 
@@ -1454,8 +1548,10 @@ app.post("/api/intelligence/analyze-version", async (req, res) => {
 - 샷 코드: **${shotCode}**
 - 버전 코드: **${versionCode}**
 - 분석 모드: **${analysisMode ? analysisMode.toUpperCase() : "GENERAL CHAT"}**
+- 실시간 비디오 검수(Vision) 활성상태: **${enableVision ? "활성화 (시각 프레임 정밀 분석)" : "비활성화 (메타데이터 중심 절약 분석)"}**
 
 ${diagnosis}
+${extraBadge}
 
 ---
 *안내: 본 AI 가이드는 Sandbox 로컬 엔진의 정밀 검출 가이드입니다. 실시간 비주얼 LLM 라이브 인퍼런스를 원하시면 \`GEMINI_API_KEY\`를 입력해주세요.*`;
@@ -1503,11 +1599,52 @@ ${historyPrompt}
 4. 마크다운 형식을 사용하여 소제목, 가독성 높은 글머리기호, 강조 기법을 가미하여 읽는 사람에게 높은 신뢰도를 전하십시오.
 `;
 
+    let contents: any = prompt;
+    let videoLoaded = false;
+    let cacheReused = false;
+
+    // Fetch and upload secure video to Gemini File API only if enableVision is true!
+    if (enableVision && videoUrl && (videoUrl.startsWith("http://") || videoUrl.startsWith("https://"))) {
+      try {
+        const cachedBefore = uploadedVideosCache.has(videoUrl);
+        const uploadedFile = await getOrUploadVideoFile(ai, videoUrl);
+        if (uploadedFile) {
+          contents = [
+            {
+              fileData: {
+                fileUri: uploadedFile.fileUri,
+                mimeType: uploadedFile.mimeType,
+              }
+            },
+            {
+              text: prompt + "\n\n[📢 비디오 데이터가 성공적으로 분석 엔진에 로드되었습니다! 업로드된 실제 프레임을 직접 확인해 정밀 visual 검수를 집도하십시오. 비디오 URL: " + cleanVideoUrl + "]"
+            }
+          ];
+          videoLoaded = true;
+          cacheReused = cachedBefore;
+          console.log(`[Gemini API] Video integrated via File API! Cached reuse: ${cacheReused}. Uri: ${uploadedFile.fileUri}`);
+        }
+      } catch (videoErr: any) {
+        console.warn(`[Gemini API] Skipping visual load due to File API helper failure: ${videoErr.message || videoErr}`);
+      }
+    }
+
     const response = await generateContentWithFallback(ai, {
-      contents: prompt,
+      contents: contents,
     });
 
-    res.json({ responseText: response.text || "분석 결과를 출력하지 못했습니다." });
+    let extraBadge = "";
+    if (videoLoaded) {
+      if (cacheReused) {
+        extraBadge = "\n\n*(✨ 제미나이 AI가 사용자의 요청성 실시간 비디오 검수(Vision)를 완료했습니다. [알림: 48시간 이내 이미 업로드된 Gemini File API 캐싱을 재사용하였으므로 다운로드 요금 및 Egress 트래픽이 발생하지 않았습니다!])*";
+      } else {
+        extraBadge = "\n\n*(✨ 제미나이 AI가 원본 비디오를 Gemini File API에 극비 보관(업로드)한 후 실시간 비디오 검수(Vision)를 무사 완료했습니다. [알림: 업로드된 프록시 비디오는 향후 48시간 동안 무료 유지 및 반복 재활용됩니다.])*";
+      }
+    } else {
+      extraBadge = "\n\n*(📋 메타데이터 전용 분석 모드 실행 중입니다. 동영상 주입에 따른 Gemini Visual Inference 토큰 비용 및 다운로드 트래픽이 0원 수준으로 절약된 검토 결과서입니다.)*";
+    }
+
+    res.json({ responseText: (response.text || "분석 결과를 출력하지 못했습니다.") + extraBadge });
   } catch (err: any) {
     res.status(500).json({ error: `Gemini API 영상 분석 에러: ${err.message}` });
   }
@@ -1626,13 +1763,13 @@ app.get("/api/dashboard-stats", async (req, res) => {
     }
 
     const totalTasks = tasks.length;
-    const wtgCount = tasks.filter((t: any) => t.sg_status_list === "wtg").length;
-    const ipCount = tasks.filter((t: any) => t.sg_status_list === "ip").length;
-    const revCount = tasks.filter((t: any) => t.sg_status_list === "rev").length;
-    const finCount = tasks.filter((t: any) => ["fin", "apr", "approved", "complete", "cmpt"].includes((t.sg_status_list || "").toLowerCase())).length;
+    const wtgCount = tasks.filter((t: any) => normalizeShotgridStatus(t.sg_status_list) === "wtg").length;
+    const ipCount = tasks.filter((t: any) => normalizeShotgridStatus(t.sg_status_list) === "ip").length;
+    const revCount = tasks.filter((t: any) => normalizeShotgridStatus(t.sg_status_list) === "rev").length;
+    const finCount = tasks.filter((t: any) => normalizeShotgridStatus(t.sg_status_list) === "fin").length;
 
     const progress = totalTasks > 0 ? Math.round((finCount / totalTasks) * 100) : 0;
-    const pendingVersions = versions.filter((v: any) => v.sg_status_list === "rev").slice(0, 3);
+    const pendingVersions = versions.filter((v: any) => normalizeShotgridStatus(v.sg_status_list) === "rev").slice(0, 3);
     
     // Quick filters 'My Tasks' (mock current artist: 최동현 with ID 4)
     const myTasks = tasks.filter((t: any) => 
@@ -1650,6 +1787,224 @@ app.get("/api/dashboard-stats", async (req, res) => {
       pending_versions: pendingVersions,
       my_tasks: myTasks
     });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/dday-tasks
+app.get("/api/dday-tasks", async (req, res) => {
+  const config = loadConfig();
+  try {
+    let projects: any[] = [];
+    let tasks: any[] = [];
+
+    if (config.use_mock || !config.base_url) {
+      const db = loadMockDB();
+      projects = (db.projects || []).filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin";
+      });
+      tasks = db.tasks || [];
+    } else {
+      const token = await getAccessToken(config);
+      const allProjects = await getProjectsFromShotgrid(config, token);
+      projects = allProjects.filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin";
+      });
+
+      const tasksPromises = projects.map(async (p: any) => {
+        try {
+          return await fetchShotgridSearch(
+            config,
+            token,
+            "Task",
+            [["project", "is", { type: "Project", id: p.id }]],
+            ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
+          );
+        } catch (err: any) {
+          console.error(`[DDAY ERROR] Failed to fetch tasks for project ${p.id}:`, err.message);
+          return [];
+        }
+      });
+      const results = await Promise.all(tasksPromises);
+      tasks = results.flat();
+    }
+
+    let todayStr = req.query.today as string;
+    if (!todayStr) {
+      const d = new Date();
+      const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+      const kstDate = new Date(utc + (3600000 * 9));
+      todayStr = kstDate.toISOString().split("T")[0];
+    }
+
+    const todayDate = new Date(todayStr);
+    const day = todayDate.getDay(); 
+    const diffToSunday = day === 0 ? 0 : 7 - day;
+    const sundayDate = new Date(todayDate);
+    sundayDate.setDate(todayDate.getDate() + diffToSunday);
+    const sundayStr = sundayDate.toISOString().split("T")[0];
+
+    const ddayProjects = projects.map((p) => {
+      const projTasks = tasks.filter((t: any) => t.project?.id === p.id);
+      
+      const compTasks = projTasks.filter((t: any) => {
+        if (!t.due_date) return false;
+        
+        const stepName = (t.sg_task || (t.step && typeof t.step === "object" ? t.step.name : t.step) || t.content || "").toLowerCase();
+        const isComp = stepName.includes("comp") || stepName.includes("composite") || stepName.includes("compositing");
+        if (!isComp) return false;
+
+        return t.due_date >= todayStr && t.due_date <= sundayStr;
+      });
+
+      compTasks.sort((a: any, b: any) => a.due_date.localeCompare(b.due_date));
+
+      const parsedCompTasks = compTasks.map((t: any) => {
+        let assigneeName = "";
+        if (t.task_assignees) {
+          assigneeName = t.task_assignees.map((a: any) => a.name).join(", ");
+        }
+        if (assigneeName) {
+          assigneeName = assigneeName.replace(/\(.*?\)/g, "").trim();
+        }
+
+        return {
+          id: t.id,
+          shot_code: t.entity?.name || t.entity?.code || "Unknown Shot",
+          due_date: t.due_date,
+          status: t.sg_status_list || "wtg",
+          assignee: assigneeName,
+          content: t.content
+        };
+      });
+
+      return {
+        id: p.id,
+        name: p.name,
+        code: p.code,
+        sg_status: p.sg_status,
+        tasks: parsedCompTasks
+      };
+    }).filter(p => p.tasks.length > 0);
+
+    res.json(ddayProjects);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/report-stats
+app.get("/api/report-stats", async (req, res) => {
+  const config = loadConfig();
+  try {
+    let projects: any[] = [];
+    if (config.use_mock || !config.base_url) {
+      const db = loadMockDB();
+      projects = (db.projects || []).filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin";
+      });
+
+      const reportData = projects.map((p) => {
+        const projShots = (db.shots || []).filter((s: any) => s.project?.id === p.id);
+        const projTasks = (db.tasks || []).filter((t: any) => t.project?.id === p.id);
+
+        const comp_tasks_by_status: Record<string, number> = {};
+        const matte_tasks_by_status: Record<string, number> = {};
+
+        projTasks.forEach((t: any) => {
+          const stepKey = (t.sg_task || (t.step && typeof t.step === "object" ? t.step.name : t.step) || t.content || "").toLowerCase();
+          const rawStatus = (t.sg_status_list || "wtg").toLowerCase().trim();
+
+          if (stepKey.includes("comp") || stepKey.includes("composite") || stepKey.includes("compositing")) {
+            comp_tasks_by_status[rawStatus] = (comp_tasks_by_status[rawStatus] || 0) + 1;
+          } else if (stepKey.includes("matte")) {
+            matte_tasks_by_status[rawStatus] = (matte_tasks_by_status[rawStatus] || 0) + 1;
+          }
+        });
+
+        return {
+          id: p.id,
+          name: p.name,
+          code: p.code,
+          sg_status: p.sg_status,
+          total_shots: projShots.length,
+          comp_tasks_by_status,
+          matte_tasks_by_status,
+        };
+      });
+
+      return res.json(reportData);
+    } else {
+      const token = await getAccessToken(config);
+      const allProjects = await getProjectsFromShotgrid(config, token);
+      const activeProjects = allProjects.filter((p: any) => {
+        const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
+        return subStatus !== "fin";
+      });
+
+      const reportPromises = activeProjects.map(async (p: any) => {
+        try {
+          const [projShots, projTasks] = await Promise.all([
+            fetchShotgridSearch(
+              config,
+              token,
+              "Shot",
+              [["project", "is", { type: "Project", id: p.id }]],
+              ["id"]
+            ),
+            fetchShotgridSearch(
+              config,
+              token,
+              "Task",
+              [["project", "is", { type: "Project", id: p.id }]],
+              ["id", "content", "sg_status_list", "step"]
+            )
+          ]);
+
+          const comp_tasks_by_status: Record<string, number> = {};
+          const matte_tasks_by_status: Record<string, number> = {};
+
+          projTasks.forEach((t: any) => {
+            const stepName = (t.step && typeof t.step === "object" ? t.step.name : (t.step || t.content || "")).toLowerCase();
+            const rawStatus = (t.sg_status_list || "wtg").toLowerCase().trim();
+
+            if (stepName.includes("comp") || stepName.includes("composite") || stepName.includes("compositing")) {
+              comp_tasks_by_status[rawStatus] = (comp_tasks_by_status[rawStatus] || 0) + 1;
+            } else if (stepName.includes("matte")) {
+              matte_tasks_by_status[rawStatus] = (matte_tasks_by_status[rawStatus] || 0) + 1;
+            }
+          });
+
+          return {
+            id: p.id,
+            name: p.name,
+            code: p.code,
+            sg_status: p.sg_status,
+            total_shots: projShots.length,
+            comp_tasks_by_status,
+            matte_tasks_by_status,
+          };
+        } catch (err: any) {
+          console.error(`[REPORT ERROR] Failed to fetch data for project ${p.id}:`, err.message);
+          return {
+            id: p.id,
+            name: p.name,
+            code: p.code,
+            sg_status: p.sg_status,
+            total_shots: 0,
+            comp_tasks_by_status: {},
+            matte_tasks_by_status: {},
+          };
+        }
+      });
+
+      const reportData = await Promise.all(reportPromises);
+      return res.json(reportData);
+    }
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

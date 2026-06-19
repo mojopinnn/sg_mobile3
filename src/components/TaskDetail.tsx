@@ -192,10 +192,10 @@ export default function TaskDetail({ taskId, onNavigate }: TaskDetailProps) {
 
           <div className="grid grid-cols-2 gap-2">
             {[
-              { id: "wtg", label: "대기 중 (WTG)", activeClass: "bg-stone-800 text-stone-200 border-stone-500" },
-              { id: "ip", label: "진행 중 (IP)", activeClass: "bg-blue-900/30 text-blue-300 border-blue-600" },
-              { id: "rev", label: "검토 요청 (REV)", activeClass: "bg-amber-900/30 text-amber-300 border-amber-500/60" },
-              { id: "fin", label: "완료 (FIN)", activeClass: "bg-emerald-900/30 text-emerald-300 border-emerald-500" },
+              { id: "wtg", label: "WTG", activeClass: "bg-stone-800 text-stone-200 border-stone-500" },
+              { id: "ip", label: "IP", activeClass: "bg-blue-900/30 text-blue-300 border-blue-600" },
+              { id: "rev", label: "REV", activeClass: "bg-amber-900/30 text-amber-300 border-amber-500/60" },
+              { id: "fin", label: "FIN", activeClass: "bg-emerald-900/30 text-emerald-300 border-emerald-500" },
             ].map((btn) => {
               const isActive = task.sg_status_list === btn.id;
               return (

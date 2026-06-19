@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Brain, X, PlayCircle, Loader2, Send } from "lucide-react";
+import { Brain, X, PlayCircle, Loader2, Send, Eye, EyeOff, Info } from "lucide-react";
 import { Version, Shot } from "../types";
 
 interface VersionChatModalProps {
@@ -22,6 +22,7 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
   >([]);
   const [currentVersionMessage, setCurrentVersionMessage] = useState<string>("");
   const [isVersionChatLoading, setIsVersionChatLoading] = useState<boolean>(false);
+  const [enableVision, setEnableVision] = useState<boolean>(false);
   const [versionAnalysisMode, setVersionAnalysisMode] = useState<
     "general" | "clipping" | "tracking" | "lighting"
   >("general");
@@ -130,6 +131,7 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
           shotDescription: matchedShot?.description || "",
           shotWorkOrder: matchedShot?.sg_work_order || "",
           versionDescription: version.description || "",
+          enableVision: enableVision,
         }),
       });
 
@@ -289,6 +291,43 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
 
         {/* Input Form */}
         <div className="shrink-0">
+          {/* Selective Vision analysis controller panel */}
+          <div className="bg-stone-50 border border-stone-200 rounded-2xl p-3.5 mb-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-stone-800">
+            <div className="flex items-start space-x-3">
+              <div className={`p-2 rounded-xl border ${enableVision ? 'bg-indigo-50 border-indigo-100 text-indigo-600 animate-pulse' : 'bg-stone-100 border-stone-250 text-stone-500'}`}>
+                {enableVision ? <Eye className="w-4.5 h-4.5" /> : <EyeOff className="w-4.5 h-4.5" />}
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[13px] font-black text-stone-900 tracking-tight leading-normal">
+                  {enableVision ? "🎬 실시간 비디오 검수 가동 중 (Gemini Frame Vision)" : "📋 공정 메타데이터 분석 가동 중 (Metadata Only)"}
+                </span>
+                <span className="text-[10.5px] font-bold text-stone-500 leading-normal mt-0.5 max-w-2xl">
+                  {enableVision 
+                    ? "동영상 프레임을 직접 Ingest하여 비주얼 클리핑 및 모션 결함을 정밀 검출합니다. (최초 1회만 Gemini File API에 업로드 보관되어 48시간 이내 반복 재질문 시 추가 다운로드 요금 및 Egress 트래픽이 완전히 면제됩니다.)"
+                    : "비행 일정, 아티스트 파이프라인 노트, 작업지시서와 같은 메타데이터 위주로 빠르게 비교 대조합니다. (비디오 Vision 연동이 비활성화되어 추론 요금이 극소화되고 속도가 수 배 빠릅니다.)"
+                  }
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-1.5 shrink-0 self-end md:self-auto">
+              <button
+                type="button"
+                onClick={() => setEnableVision(false)}
+                className={`px-3 py-1.5 rounded-xl text-[12px] font-black tracking-tight transition cursor-pointer border ${!enableVision ? 'bg-white border-stone-300 text-stone-900 shadow-sm' : 'bg-stone-100 border-stone-200 text-stone-500 hover:bg-stone-200'}`}
+              >
+                메타데이터 전용 (절약)
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1.5 rounded-xl text-[12px] font-black tracking-tight transition cursor-pointer border ${enableVision ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm' : 'bg-stone-100 border-stone-200 text-stone-500 hover:bg-stone-200'}`}
+                onClick={() => setEnableVision(true)}
+              >
+                비디오 Vision 검수 활성
+              </button>
+            </div>
+          </div>
+
           <form
             onSubmit={(e) => {
               e.preventDefault();

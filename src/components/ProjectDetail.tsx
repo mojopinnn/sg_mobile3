@@ -383,19 +383,15 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
 
   const renderTaskStatusIcon = (status: string) => {
     const code = (status || "").toLowerCase().trim();
-    if (["wtg", "waiting", "ready", "ready to start", "readytostart"].includes(code)) {
-      return <Clock className="w-3.5 h-3.5 text-stone-400 inline-block ml-1" title="대기 중" />;
-    }
-    if (["ip", "inprogress", "in_progress", "wip"].includes(code)) {
-      return <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin inline-block ml-1" title="진행 중" />;
-    }
-    if (["rev", "review", "pending_review", "pending", "pnd"].includes(code)) {
-      return <Eye className="w-3.5 h-3.5 text-amber-500 inline-block ml-1" title="검토 요청" />;
-    }
-    if (["fin", "final", "complete", "approved", "apr", "dok", "double check", "doublecheck"].includes(code)) {
-      return <Check className="w-3.5 h-3.5 text-emerald-500 inline-block ml-1 font-bold" title="완료" />;
-    }
-    return <span className="text-[9px] text-stone-400 font-semibold ml-1">({code.toUpperCase()})</span>;
+    const style = getStatusStyle(code);
+    return (
+      <span 
+        className={`inline-flex items-center justify-center px-1.5 py-0.5 ml-1.5 rounded text-[8px] font-black tracking-wide uppercase leading-none border shadow-3xs ${style.bg} ${style.text} ${style.border}`}
+        title={style.label}
+      >
+        {style.label}
+      </span>
+    );
   };
 
   const formatSlashText = (text: string | undefined | null) => {
@@ -474,12 +470,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
 
   // Helper to translate status codes into human friendly text
   const getStatusLabelText = (status: string) => {
-    const code = status.toLowerCase();
-    if (code === "wtg" || code === "waiting" || code === "ready" || code === "ready to start" || code === "readytostart") return "대기 (WTG)";
-    if (code === "ip" || code === "inprogress" || code === "in_progress" || code === "wip") return "진행 (IP)";
-    if (code === "rev" || code === "review" || code === "pending_review" || code === "pending" || code === "pnd") return "검토요청 (REV)";
-    if (code === "fin" || code === "final" || code === "complete" || code === "approved" || code === "apr" || code === "dok" || code === "double check" || code === "doublecheck") return "완료 (FIN)";
-    return code.toUpperCase();
+    return getStatusStyle(status).label;
   };
 
   // Helper toggle handlers

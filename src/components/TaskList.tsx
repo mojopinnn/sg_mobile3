@@ -122,10 +122,23 @@ export default function TaskList({ initialUserId, onNavigate }: TaskListProps) {
                 className="w-full bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs text-stone-850 font-bold focus:outline-none"
               >
                 <option value="">[전체 상태]</option>
-                <option value="wtg">대기 중 (WTG)</option>
-                <option value="ip">진행 중 (IP)</option>
-                <option value="rev">검토 요청 (REV)</option>
-                <option value="fin">완료 (FIN)</option>
+                <option value="wtg">WTG</option>
+                <option value="rd">RD</option>
+                <option value="wip">WIP</option>
+                <option value="pus">PUS</option>
+                <option value="tc">TC</option>
+                <option value="pc">PC</option>
+                <option value="cc">CC</option>
+                <option value="sc">sc (SV)</option>
+                <option value="rv">RV</option>
+                <option value="pub">Pub</option>
+                <option value="tpub">t-Pub</option>
+                <option value="rt">RT</option>
+                <option value="kg">KG</option>
+                <option value="tfin">TFIN</option>
+                <option value="fin">FIN</option>
+                <option value="ct">CT</option>
+                <option value="cts">CTS</option>
               </select>
             </div>
 
