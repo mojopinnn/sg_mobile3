@@ -67,6 +67,12 @@ export interface Project {
   progress_3?: number;
   matte_progress?: number | null;
   comp_progress?: number | null;
+  matte_stats?: { total: number; fin: number; tpub: number };
+  lgt_stats?: { total: number; fin: number; tpub: number };
+  fx_stats?: { total: number; fin: number; tpub: number };
+  total_shots_count?: number;
+  active_shots_count?: number;
+  comp_last_due_date?: string | null;
 }
 
 export interface ShotgridConfig {

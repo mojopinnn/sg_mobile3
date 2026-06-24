@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Project, Shot, Version } from "../types";
 import { getStatusStyle, cleanAssigneeName } from "../utils";
-import { ChevronLeft, Film, PlayCircle, Loader2, Image as ImageIcon, Eye, Clock, Check, AlertCircle, X, Brain, FileText, Search, Send, Sparkles, ExternalLink, Share2, RefreshCw, Database, ChevronRight } from "lucide-react";
+import { ChevronLeft, Film, PlayCircle, Loader2, Image as ImageIcon, Eye, Clock, Check, AlertCircle, X, Brain, FileText, Search, Send, Sparkles, ExternalLink, Share2, RefreshCw, Database, ChevronRight, ChevronDown } from "lucide-react";
 import { motion } from "motion/react";
 import { VersionChatModal } from "./VersionChatModal";
 
@@ -66,13 +66,106 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
   const [selectedTaskSteps, setSelectedTaskSteps] = useState<string[]>([]);
   const [selectedTaskStatuses, setSelectedTaskStatuses] = useState<string[]>([]);
   const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
+  const [selectedCompDueDates, setSelectedCompDueDates] = useState<string[]>([]);
 
   const [stepDropdownOpen, setStepDropdownOpen] = useState(false);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
+  const [compDueDateDropdownOpen, setCompDueDateDropdownOpen] = useState(false);
 
   const [activeVideoUrl, setActiveVideoUrl] = useState<string | null>(null);
   const [activeVideoTitle, setActiveVideoTitle] = useState<string | null>(null);
+
+  // Global Connected Project Copilot States
+  const [isCopilotOpen, setIsCopilotOpen] = useState<boolean>(false);
+  const [customSystemInstructions, setCustomSystemInstructions] = useState<string>(() => {
+    return localStorage.getItem(`vfx_copilot_${projectId}`) || "우선순위가 가장 급한 샷이나 위험 샷을 선발해 스케줄링 가이드를 해주세요. 가이드는 엄격하게 일정 준수 측면을 체크하며, 답변 마지막에 실무자용 조치사항들을 Bullet point로 남겨주세요.";
+  });
+  const [copilotMessages, setCopilotMessages] = useState<Array<{ sender: "user" | "gemini"; text: string; timestamp: string }>>([
+    {
+      sender: "gemini",
+      text: "안녕하세요! 프로젝트의 전체 샷리스트를 면밀하게 대조 검수하고, 정리 및 스케줄링, 병목 문제 파악을 조력하는 **Gemini VFX 전천후 Co-Pilot 에이전트**입니다. 상단 설정 부에서 외부 상황이나 특정 요구(페르소나/마일스톤 조건 등)를 먼저 부여해두신 후, 무엇이든 물어보세요!",
+      timestamp: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+    }
+  ]);
+  const [copilotInput, setCopilotInput] = useState<string>("");
+  const [isCopilotLoading, setIsCopilotLoading] = useState<boolean>(false);
+  const [isInstructionsExpanded, setIsInstructionsExpanded] = useState<boolean>(false);
+
+  const handleSaveInstructions = (val: string) => {
+    setCustomSystemInstructions(val);
+    localStorage.setItem(`vfx_copilot_${projectId}`, val);
+  };
+
+  const handleSendCopilotMessage = async (customText?: string) => {
+    const textToSend = customText || copilotInput;
+    if (!textToSend.trim() || isCopilotLoading) return;
+
+    // 1. Add user bubble to view
+    const timestampStr = new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    const userBubble = { sender: "user" as const, text: textToSend, timestamp: timestampStr };
+    setCopilotMessages(prev => [...prev, userBubble]);
+    if (!customText) setCopilotInput("");
+    setIsCopilotLoading(true);
+
+    try {
+      // Optimize shots payload to only the metadata and tasks needed for the AI prompt
+      const optimizedShots = (shots || []).map((s: any) => ({
+        code: s.code,
+        name: s.name,
+        sg_status: s.sg_status,
+        tasks: (s.tasks || []).map((t: any) => ({
+          sg_task: t.sg_task,
+          step: typeof t.step === "object" ? { name: t.step?.name || "" } : t.step,
+          content: t.content,
+          sg_status_list: t.sg_status_list,
+          task_assignees: (t.task_assignees || []).map((u: any) => ({ name: u.name }))
+        }))
+      }));
+
+      // 2. Fetch from backend with all available shots & custom settings in context
+      const res = await fetch("/api/intelligence/project-copilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: project?.id || projectId,
+          projectName: project?.name || "진행 프로젝트",
+          customSystemInstructions,
+          shots: optimizedShots, // Pass down optimized lightweight shots
+          chatHistory: [...copilotMessages, userBubble],
+          userMessage: textToSend
+        })
+      });
+
+      if (!res.ok) {
+        let errMsg = "서버 응답 오류";
+        try {
+          const errData = await res.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errMsg);
+      }
+
+      const data = await res.json();
+      
+      // 3. Add Gemini reply bubble
+      setCopilotMessages(prev => [...prev, {
+        sender: "gemini",
+        text: data.responseText || "분석 결과를 받아올 수 없습니다.",
+        timestamp: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+      }]);
+    } catch (e: any) {
+      setCopilotMessages(prev => [...prev, {
+        sender: "gemini",
+        text: `죄송합니다. 대형 에이전트 연동 중 오류가 발생했습니다: ${e.message}`,
+        timestamp: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+      }]);
+    } finally {
+      setIsCopilotLoading(false);
+    }
+  };
 
   const getVersionVideoUrl = (version: any): string => {
     if (!version) return "";
@@ -468,6 +561,30 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
     )
   ) as string[]).sort((a, b) => a.localeCompare(b, "ko"));
 
+  // Helper to extract COMP task due date for a shot
+  const getShotCompDueDate = (shot: Shot): string | null => {
+    const compTasks = (shot.parsed_tasks || []).filter((t) => {
+      const stepName = (t.step || "").toLowerCase();
+      const content = (t.content || "").toLowerCase();
+      const sgTask = (t.sg_task || "").toLowerCase();
+      return stepName.includes("comp") || content.includes("comp") || sgTask.includes("comp");
+    });
+    if (compTasks.length === 0) return null;
+    const dates = compTasks.map(t => t.due_date).filter(Boolean) as string[];
+    if (dates.length === 0) return null;
+    dates.sort();
+    return dates[dates.length - 1]; // latest comp due date
+  };
+
+  // Extract unique COMP due dates across all loaded shots
+  const availableCompDueDates = Array.from(
+    new Set(
+      shots
+        .map((s) => getShotCompDueDate(s))
+        .filter(Boolean)
+    )
+  ).sort() as string[];
+
   // Helper to translate status codes into human friendly text
   const getStatusLabelText = (status: string) => {
     return getStatusStyle(status).label;
@@ -492,25 +609,41 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
     );
   };
 
+  const toggleCompDueDateFilter = (date: string) => {
+    setSelectedCompDueDates((prev) =>
+      prev.includes(date) ? prev.filter((d) => d !== date) : [...prev, date]
+    );
+  };
+
   const handleClearAllFilters = () => {
     setSelectedTaskSteps([]);
     setSelectedTaskStatuses([]);
     setSelectedAssignees([]);
+    setSelectedCompDueDates([]);
   };
 
-  const isFiltered = selectedTaskSteps.length > 0 || selectedTaskStatuses.length > 0 || selectedAssignees.length > 0;
+  const isFiltered =
+    selectedTaskSteps.length > 0 ||
+    selectedTaskStatuses.length > 0 ||
+    selectedAssignees.length > 0 ||
+    selectedCompDueDates.length > 0;
 
   // Filter the actual shots
   const filteredShots = shots.filter((shot) => {
-    if (!isFiltered) return true;
-
-    return (shot.parsed_tasks || []).some((task) => {
+    // 1. standard filters check (only check if standard filters are active)
+    const hasStandardActive = selectedTaskSteps.length > 0 || selectedTaskStatuses.length > 0 || selectedAssignees.length > 0;
+    const matchesStandard = !hasStandardActive || (shot.parsed_tasks || []).some((task) => {
       const stepMatch = selectedTaskSteps.length === 0 || selectedTaskSteps.map(s => s.toLowerCase()).includes((task.step || "").toLowerCase());
       const statusMatch = selectedTaskStatuses.length === 0 || selectedTaskStatuses.map(s => s.toLowerCase()).includes((task.status || "").toLowerCase());
       const assigneeMatch = selectedAssignees.length === 0 || selectedAssignees.includes(cleanAssigneeName(task.assignee_name));
-      
       return stepMatch && statusMatch && assigneeMatch;
     });
+
+    // 2. comp due date filter check
+    const shotCompDueDate = getShotCompDueDate(shot);
+    const matchesCompDueDate = selectedCompDueDates.length === 0 || (shotCompDueDate && selectedCompDueDates.includes(shotCompDueDate));
+
+    return matchesStandard && matchesCompDueDate;
   });
 
   return (
@@ -531,9 +664,21 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
           <span className="text-[10px] font-mono font-bold text-blue-600 uppercase tracking-widest">{project.code}</span>
           <h1 className="text-xl font-bold text-stone-950 leading-tight mt-0.5">{project.name}</h1>
         </div>
-        <span className="px-2.5 py-1 rounded-full text-[10px] tracking-wider font-extrabold uppercase border bg-emerald-50 text-emerald-700 border-emerald-100">
-          {project.sg_status}
-        </span>
+        <div className="flex items-center gap-2">
+          {/* 글로벌 제미나이 코파일럿 버튼 */}
+          <button
+            onClick={() => setIsCopilotOpen(true)}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-black text-[11px] px-3.5 py-2 rounded-2xl shadow-sm hover:shadow transition-all duration-300 hover:-translate-y-0.5 cursor-pointer"
+          >
+            <Brain className="w-4 h-4 animate-pulse text-indigo-100" />
+            <span>GEMINI CO-PILOT</span>
+            <span className="bg-indigo-500/50 text-[8px] px-1 rounded text-indigo-100 font-extrabold uppercase scale-90 text-[7px]">ACTIVE</span>
+          </button>
+
+          <span className="px-2.5 py-2 rounded-2xl text-[10px] tracking-wider font-extrabold uppercase border bg-emerald-50 text-emerald-700 border-emerald-100">
+            {project.sg_status}
+          </span>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -596,13 +741,14 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
             ) : (
               <>
                 {/* Back-drop Overlay for Dropdowns */}
-                {(stepDropdownOpen || statusDropdownOpen || assigneeDropdownOpen) && (
+                {(stepDropdownOpen || statusDropdownOpen || assigneeDropdownOpen || compDueDateDropdownOpen) && (
                   <div
                     className="fixed inset-0 z-10 cursor-default"
                     onClick={() => {
                       setStepDropdownOpen(false);
                       setStatusDropdownOpen(false);
                       setAssigneeDropdownOpen(false);
+                      setCompDueDateDropdownOpen(false);
                     }}
                   />
                 )}
@@ -628,9 +774,9 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                 {/* Beautiful Advanced Multi-Filter Controls */}
                 {shots.length > 0 && (
                   <div className="bg-stone-55/80 border border-stone-200/95 rounded-3xl p-4 flex flex-col gap-4 shadow-sm animate-fade-in mb-2">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
                       {/* 1. 태스크 필터 멀티 드롭다운 */}
-                      <div className="relative flex flex-col space-y-1 z-20">
+                      <div className={`relative flex flex-col space-y-1 ${stepDropdownOpen ? "z-30" : "z-20"}`}>
                         <span className="text-[9px] font-black uppercase text-stone-400 tracking-wider">
                           태스크 단계 (Task Step)
                         </span>
@@ -640,6 +786,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                             setStepDropdownOpen(!stepDropdownOpen);
                             setStatusDropdownOpen(false);
                             setAssigneeDropdownOpen(false);
+                            setCompDueDateDropdownOpen(false);
                           }}
                           className="bg-white border border-stone-205 hover:border-blue-400 rounded-xl px-3 py-2 text-xs text-stone-800 font-extrabold transition shadow-sm cursor-pointer w-full text-left flex justify-between items-center"
                         >
@@ -694,7 +841,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                       </div>
 
                       {/* 2. 상태 필터 멀티 드롭다운 */}
-                      <div className="relative flex flex-col space-y-1 z-20">
+                      <div className={`relative flex flex-col space-y-1 ${statusDropdownOpen ? "z-30" : "z-20"}`}>
                         <span className="text-[9px] font-black uppercase text-stone-400 tracking-wider">
                           태스크 상태 (Task Status)
                         </span>
@@ -704,6 +851,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                             setStatusDropdownOpen(!statusDropdownOpen);
                             setStepDropdownOpen(false);
                             setAssigneeDropdownOpen(false);
+                            setCompDueDateDropdownOpen(false);
                           }}
                           className="bg-white border border-stone-205 hover:border-blue-400 rounded-xl px-3 py-2 text-xs text-stone-800 font-extrabold transition shadow-sm cursor-pointer w-full text-left flex justify-between items-center"
                         >
@@ -758,7 +906,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                       </div>
 
                       {/* 3. 작업자 필터 멀티 드롭다운 */}
-                      <div className="relative flex flex-col space-y-1 z-20">
+                      <div className={`relative flex flex-col space-y-1 ${assigneeDropdownOpen ? "z-30" : "z-20"}`}>
                         <span className="text-[9px] font-black uppercase text-stone-400 tracking-wider">
                           작업자 배정 (Assigned To)
                         </span>
@@ -768,6 +916,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                             setAssigneeDropdownOpen(!assigneeDropdownOpen);
                             setStepDropdownOpen(false);
                             setStatusDropdownOpen(false);
+                            setCompDueDateDropdownOpen(false);
                           }}
                           className="bg-white border border-stone-205 hover:border-blue-400 rounded-xl px-3 py-2 text-xs text-stone-800 font-extrabold transition shadow-sm cursor-pointer w-full text-left flex justify-between items-center"
                         >
@@ -826,6 +975,77 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                           </div>
                         )}
                       </div>
+
+                      {/* 4. COMP Due Date 필터 멀티 드롭다운 */}
+                      <div className={`relative flex flex-col space-y-1 ${compDueDateDropdownOpen ? "z-30" : "z-20"}`}>
+                        <span className="text-[9px] font-black uppercase text-stone-400 tracking-wider">
+                          COMP 마감일 (COMP Due Date)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCompDueDateDropdownOpen(!compDueDateDropdownOpen);
+                            setStepDropdownOpen(false);
+                            setStatusDropdownOpen(false);
+                            setAssigneeDropdownOpen(false);
+                          }}
+                          className="bg-white border border-stone-205 hover:border-blue-400 rounded-xl px-3 py-2 text-xs text-stone-800 font-extrabold transition shadow-sm cursor-pointer w-full text-left flex justify-between items-center"
+                        >
+                          <span className="truncate">
+                            {selectedCompDueDates.length === 0
+                              ? "모든 마감일"
+                              : `마감일 ${selectedCompDueDates.length}개 선택됨`}
+                          </span>
+                          <span className="text-stone-400 text-[10px] ml-1 flex-shrink-0">
+                            {compDueDateDropdownOpen ? "▲" : "▼"}
+                          </span>
+                        </button>
+                        {compDueDateDropdownOpen && (
+                          <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-stone-200 rounded-2xl shadow-xl z-30 max-h-56 overflow-y-auto p-2 space-y-1 animate-fade-in min-w-[200px]">
+                            <div className="flex justify-between items-center px-1.5 py-1 border-b border-stone-100 mb-1">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedCompDueDates([])}
+                                className="text-[9px] font-black text-stone-400 hover:text-stone-700 uppercase"
+                              >
+                                모두 해제
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedCompDueDates([...availableCompDueDates])}
+                                className="text-[9px] font-black text-blue-600 hover:text-blue-800 uppercase"
+                              >
+                                전체 선택
+                              </button>
+                            </div>
+                            {availableCompDueDates.length === 0 ? (
+                              <div className="text-stone-400 text-center text-[10px] font-bold py-3.5 italic">
+                                등록된 마감일이 없습니다.
+                              </div>
+                            ) : (
+                              availableCompDueDates.map((date) => {
+                                const isChecked = selectedCompDueDates.includes(date);
+                                return (
+                                  <button
+                                    type="button"
+                                    key={date}
+                                    onClick={() => toggleCompDueDateFilter(date)}
+                                    className="w-full text-left flex items-center space-x-2 px-2 py-1.5 hover:bg-stone-50 rounded-lg text-xs font-bold text-stone-700 cursor-pointer select-none transition"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      readOnly
+                                      className="accent-blue-600 h-3 w-3 rounded border-stone-300 pointer-events-none"
+                                    />
+                                    <span className="truncate">{date}</span>
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Filter Active Badge Chips */}
@@ -876,6 +1096,21 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                             </button>
                           </span>
                         ))}
+                        {selectedCompDueDates.map((date) => (
+                          <span
+                            key={date}
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 bg-teal-50 text-teal-700 border border-teal-100 rounded-full text-[10px] font-extrabold tracking-wider uppercase shadow-sm"
+                          >
+                            <span>COMP 마감일: {date}</span>
+                            <button
+                              type="button"
+                              onClick={() => toggleCompDueDateFilter(date)}
+                              className="hover:text-rose-600 ml-1.5 transition cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
 
                         <button
                           type="button"
@@ -904,12 +1139,15 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                   return (
                     <div key={shot.id} className={`${blockBg} border rounded-3xl p-4 flex flex-col space-y-3 shadow-sm transition`}>
                       {/* Upper Grid Layout: Thumbnail, Mid column layout cells, status */}
-                      <div className="flex items-start space-x-4">
+                      <div 
+                        onClick={() => setExpandedShotId(expandedShotId === shot.id ? null : shot.id)}
+                        className="flex items-start space-x-4 cursor-pointer hover:bg-stone-50/40 p-1.5 rounded-2xl -m-1.5 transition select-none"
+                        title="클릭하여 버전 목록 보기"
+                      >
                         {/* Left Thumbnail Column */}
                         <div className="flex flex-col items-center space-y-2 w-24 flex-shrink-0">
                           <div 
-                            onClick={() => handlePlayShotVideo(shot)}
-                            className="w-24 h-16 bg-stone-100 rounded-xl border border-stone-200 flex items-center justify-center overflow-hidden flex-shrink-0 shadow-inner cursor-pointer hover:border-blue-400 group relative transition"
+                            className="w-24 h-16 bg-stone-100 rounded-xl border border-stone-200 flex items-center justify-center overflow-hidden flex-shrink-0 shadow-inner group relative transition"
                           >
                             {shot.sg_org_thumbnail ? (
                               <img
@@ -929,11 +1167,14 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                               <ImageIcon className="w-5 h-5 text-stone-300" />
                             )}
                             
-                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition duration-200">
-                              <PlayCircle className="w-5 h-5 text-white/0 group-hover:text-white/90 drop-shadow-md transition duration-200" />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 flex flex-col items-center justify-center transition duration-200">
+                              <Film className="w-4 h-4 text-white/0 group-hover:text-white/100 drop-shadow transition duration-200 mb-0.5" />
+                              <span className="text-[7.5px] text-white/0 group-hover:text-white/100 font-extrabold uppercase tracking-wide transition duration-200">
+                                {getShotVersions(shot).length} Ver
+                              </span>
                             </div>
                           </div>
-                          <span className="text-[10px] font-black text-stone-800 text-center truncate w-full tracking-wider">
+                          <span className="text-[10px] font-black text-stone-800 text-center break-all whitespace-normal w-full tracking-wider">
                             {shot.code}
                           </span>
                         </div>
@@ -1058,32 +1299,36 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                             ) : (
                               <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
                                 {getShotVersions(shot).map((ver) => (
-                                  <div key={ver.id} className="bg-white border border-stone-200 rounded-xl p-2 flex items-center space-x-3 hover:border-indigo-300 transition shadow-sm">
+                                  <div 
+                                    key={ver.id} 
+                                    onClick={() => handlePlayVersionVideo(ver)}
+                                    className="bg-white border border-stone-200 rounded-xl p-2 flex items-center space-x-3 hover:border-indigo-400 hover:bg-indigo-50/15 cursor-pointer active:scale-[0.99] transition shadow-sm group/ver"
+                                    title="클릭하여 미디어 플레이어 재생"
+                                  >
                                     {/* Version Thumbnail / Preview */}
                                     <div
-                                      onClick={() => handlePlayVersionVideo(ver)}
-                                      className="w-14 h-9 bg-stone-100 rounded-lg border border-stone-200 flex items-center justify-center text-stone-400 flex-shrink-0 relative overflow-hidden cursor-pointer hover:border-blue-400 group transition"
+                                      className="w-14 h-9 bg-stone-100 rounded-lg border border-stone-200 flex items-center justify-center text-stone-400 flex-shrink-0 relative overflow-hidden transition group-hover/ver:border-indigo-400"
                                     >
                                       {ver.image ? (
                                         <>
                                           <img
                                             src={ver.image}
                                             alt={ver.code}
-                                            className="object-cover w-full h-full group-hover:scale-105 transition"
+                                            className="object-cover w-full h-full group-hover/ver:scale-105 transition"
                                             referrerPolicy="no-referrer"
                                           />
-                                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 flex items-center justify-center transition">
-                                            <PlayCircle className="w-3.5 h-3.5 text-white/0 group-hover:text-white/90 drop-shadow transition" />
+                                          <div className="absolute inset-0 bg-black/0 group-hover/ver:bg-black/20 flex items-center justify-center transition">
+                                            <PlayCircle className="w-3.5 h-3.5 text-white/0 group-hover/ver:text-white/90 drop-shadow transition" />
                                           </div>
                                         </>
                                       ) : (
-                                        <PlayCircle className="w-4 h-4 text-stone-400 fill-stone-100 group-hover:text-blue-500 transition" />
+                                        <PlayCircle className="w-4 h-4 text-stone-400 fill-stone-100 group-hover/ver:text-indigo-500 transition" />
                                       )}
                                     </div>
 
                                     {/* Version Name / Information */}
                                     <div className="flex-1 min-w-0">
-                                      <h4 className="text-[10.5px] font-black text-stone-850 truncate">{ver.code}</h4>
+                                      <h4 className="text-[10.5px] font-black text-stone-850 break-all whitespace-normal group-hover/ver:text-indigo-800 transition">{ver.code}</h4>
                                       <div className="flex items-center space-x-1.5 mt-0.5">
                                         <span className="px-1 py-0.1 space bg-amber-50 text-amber-700 border border-amber-100 rounded text-[7.5px] font-extrabold uppercase">
                                           {ver.sg_status_list ? ver.sg_status_list.toUpperCase() : "REV"}
@@ -1093,7 +1338,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                                     </div>
 
                                     {/* Co-Pilot intelligence interaction buttons */}
-                                    <div className="flex items-center space-x-1 shrink-0">
+                                    <div className="flex items-center space-x-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                                       <button
                                         type="button"
                                         onClick={() => handleOpenVersionChat(ver)}
@@ -1105,7 +1350,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                                       <button
                                         type="button"
                                         onClick={() => onNavigate("version_detail", { versionId: ver.id })}
-                                        className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-lg p-1.5 transition text-blue-600 hover:text-blue-800"
+                                        className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-lg p-1.5 transition text-blue-600 hover:text-blue-800 cursor-pointer"
                                         title="Detail view"
                                       >
                                         <Eye className="w-3.5 h-3.5" />
@@ -1197,7 +1442,7 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
                       <span className="text-[9px] text-stone-400 uppercase font-black tracking-widest block mb-0.5">
                         {ver.entity?.name || "No Entity"}
                       </span>
-                      <h3 className="text-xs font-black text-stone-850 truncate">{ver.code}</h3>
+                      <h3 className="text-xs font-black text-stone-850 break-all whitespace-normal">{ver.code}</h3>
                       <div className="flex justify-between items-center mt-1">
                         <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider border bg-amber-50 text-amber-700 border-amber-100">
                           {ver.sg_status_list ? ver.sg_status_list.toUpperCase() : "REV"}
@@ -1613,6 +1858,238 @@ export default function ProjectDetail({ projectId, onNavigate }: ProjectDetailPr
           handlePlayVersionVideo={handlePlayVersionVideo}
           shots={shots}
         />
+      )}
+
+      {/* 글로벌 프로젝트 제미나이 마스터 에이전트 드로워 */}
+      {isCopilotOpen && (
+        <>
+          {/* Backdrop Overlay */}
+          <div 
+            onClick={() => setIsCopilotOpen(false)}
+            className="fixed inset-0 z-40 bg-stone-900/30 backdrop-blur-xs transition-opacity animate-fade-in"
+          />
+          
+          <div className="fixed inset-y-0 right-0 z-50 w-full max-w-md md:max-w-lg bg-white border-l border-stone-200 shadow-2xl flex flex-col animate-[slideIn_0.22s_ease-out]">
+            {/* 1. 드로워 헤더 */}
+            <div className="p-4 border-b border-stone-150 bg-stone-50/90 flex items-center justify-between shrink-0">
+              <div className="flex items-center space-x-2">
+                <div className="bg-indigo-600 rounded-2xl p-2 shadow-sm shrink-0">
+                  <Brain className="w-4 h-4 text-white animate-pulse" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-black text-stone-900 tracking-tight flex items-center gap-1.5 leading-none">
+                    <span>GEMINI MASTER CO-PILOT</span>
+                    <span className="text-[8px] bg-indigo-100 text-indigo-700 font-extrabold px-1 py-0.5 rounded font-mono scale-90 shrink-0 text-[7px]">VFX PRO</span>
+                  </h3>
+                  <p className="text-[9.5px] font-bold text-stone-500 leading-tight mt-1 truncate">전체 공정 요약 및 스케줄링 조율, 병목 파악 에이전트</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsCopilotOpen(false)}
+                className="text-stone-400 hover:text-stone-900 hover:bg-stone-100 rounded-full p-2 transition cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* 2. 대화 세선 및 인셉션 가이드 (Scrollable Box) */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              
+              {/* ⚙️ 시스템 가이드/지침 설정 아코디언 */}
+              <div className="bg-stone-50/80 border border-stone-200 rounded-2xl overflow-hidden shadow-3xs">
+                <button
+                  type="button"
+                  onClick={() => setIsInstructionsExpanded(!isInstructionsExpanded)}
+                  className="w-full flex items-center justify-between p-3.5 text-left font-black text-[11px] text-stone-700 hover:bg-stone-100/50 transition cursor-pointer"
+                >
+                  <div className="flex items-center space-x-2">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-500 animate-bounce" />
+                    <span>글로벌 에이전트 조건 및 지침 설정 (Custom Rule)</span>
+                  </div>
+                  <ChevronDown className={`w-3.5 h-3.5 text-stone-400 transition-transform ${isInstructionsExpanded ? "rotate-180" : ""}`} />
+                </button>
+                
+                {isInstructionsExpanded && (
+                  <div className="p-3.5 border-t border-stone-150 bg-white space-y-2.5">
+                    <p className="text-[10px] text-stone-500 leading-normal font-semibold">
+                      에이전트에게 **지켜야 할 특정 조건 이나 엄격한 마일스톤 규칙, 담당자 지연 상태 평가 방식** 등의 정형 규칙을 부여합니다. 코파일럿은 대화할 때마다 부여된 조건을 준수하여 응답합니다.
+                    </p>
+                    <textarea
+                      value={customSystemInstructions}
+                      onChange={(e) => handleSaveInstructions(e.target.value)}
+                      placeholder="예: 마감이 4일 내로 임박했거나 오랜 시간 Hold된 샷들을 최우선적으로 탐지하고 일정 조정 조치사항을 시니어 PM 페르소나 형태로 엄격하게 가이드 피드백해 줘"
+                      className="w-full h-24 bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs text-stone-800 focus:outline-none focus:border-indigo-400 focus:bg-white leading-relaxed font-sans shadow-3xs"
+                    />
+                    <div className="flex justify-between items-center text-[9px] text-stone-400 font-bold font-mono">
+                      <span>✓ 타이핑 시 브라우저 로컬 저장소에 자동 기억됩니다</span>
+                      <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">로컬 동기화 완료</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ⚡ 지능형 퀵 추천 버튼 (타이핑 없이 바로 보고서 받기) */}
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black text-stone-400 uppercase tracking-widest font-mono">신속한 원클릭 종합 분석</h4>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSendCopilotMessage("현재 프로젝트의 마감 병목 상태와 샷리스트 전체 공정 지연 리스크 요소를 종합적으로 진단하고 정리해줘.")}
+                    disabled={isCopilotLoading}
+                    className="flex flex-col items-start text-left p-3 rounded-2xl border border-rose-100 bg-rose-500/[0.04] hover:bg-rose-50 hover:border-rose-300 transition-all duration-200 text-[10px] font-black cursor-pointer disabled:opacity-50 h-full justify-between gap-1 shadow-3xs"
+                  >
+                    <span className="text-rose-700 font-extrabold flex items-center gap-1">🚨 리스크 진단</span>
+                    <span className="text-stone-500 text-[8.5px] font-extrabold leading-tight">작업 중단 및 병목구간 리스크 탐색</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSendCopilotMessage("전체 샷의 담당자 스태프 배분 및 파이프라인 단계별 일정을 검토하고, 특정 담당자 몰림 현상이 있는지 분석한 후 이상적인 업무 조율 스케줄 가이드를 세워줘.")}
+                    disabled={isCopilotLoading}
+                    className="flex flex-col items-start text-left p-3 rounded-2xl border border-sky-100 bg-sky-500/[0.04] hover:bg-sky-50 hover:border-sky-300 transition-all duration-200 text-[10px] font-black cursor-pointer disabled:opacity-50 h-full justify-between gap-1 shadow-3xs"
+                  >
+                    <span className="text-sky-700 font-extrabold flex items-center gap-1">📅 스케줄 배정</span>
+                    <span className="text-stone-500 text-[8.5px] font-extrabold leading-tight">팀원 간 오버타임 업무 부하 로드 밸런싱</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSendCopilotMessage("현재 active 상태인 전체 샷리스트 데이터를 일목요연하게 정리하고 요약된 주간 추진 현황 보고서 다이어리로 한눈에 가독성 좋게 출력해줘.")}
+                    disabled={isCopilotLoading}
+                    className="flex flex-col items-start text-left p-3 rounded-2xl border border-emerald-100 bg-emerald-500/[0.04] hover:bg-emerald-50 hover:border-emerald-300 transition-all duration-200 text-[10px] font-black cursor-pointer disabled:opacity-50 h-full justify-between gap-1 shadow-3xs"
+                  >
+                    <span className="text-emerald-850 font-extrabold flex items-center gap-1">📋 샷 전체 정리</span>
+                    <span className="text-stone-500 text-[8.5px] font-extrabold leading-tight">진척도 가중치를 반영한 총 요약 보고서</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 💬 누적 대화 기록 */}
+              <div className="border-t border-stone-150 pt-4 space-y-4">
+                {copilotMessages.map((msg, index) => {
+                  const isUser = msg.sender === "user";
+                  return (
+                    <div
+                      key={index}
+                      className={`flex flex-col max-w-[94%] ${isUser ? "ml-auto items-end animate-[slideInRight_0.2s_ease-out]" : "mr-auto items-start animate-[slideInLeft_0.2s_ease-out]"}`}
+                    >
+                      <div
+                        className={`p-3.5 rounded-2xl text-[12.5px] leading-relaxed shadow-3xs font-sans ${
+                          isUser
+                            ? "bg-stone-905 bg-stone-900 text-stone-100 font-medium rounded-br-none"
+                            : "bg-indigo-50/50 text-stone-850 border border-indigo-100/50 rounded-bl-none"
+                        }`}
+                      >
+                        {/* Simple Markdown Renderer on messages */}
+                        <div className="space-y-1.5 font-medium text-[12px] text-stone-750">
+                          {msg.text.split("\n").map((line, lIdx) => {
+                            if (line.startsWith("### ")) {
+                              return (
+                                <h4 key={lIdx} className="font-extrabold text-stone-900 text-[12.5px] mt-3.5 first:mt-0 font-sans tracking-tight border-b border-indigo-100/40 pb-1 flex items-center">
+                                  <span>{line.substring(4)}</span>
+                                </h4>
+                              );
+                            }
+                            if (line.startsWith("**") && line.endsWith("**")) {
+                              return (
+                                <p key={lIdx} className="font-black text-stone-900 mt-2 text-[12px]">
+                                  {line.replace(/\*\*/g, "")}
+                                </p>
+                              );
+                            }
+                            
+                            // Highlight inline bold elements (**some**)
+                            const regex = /\*\*(.*?)\*\*/g;
+                            let match;
+                            let lastIdx = 0;
+                            const parts = [];
+                            while ((match = regex.exec(line)) !== null) {
+                              const preText = line.substring(lastIdx, match.index);
+                              if (preText) parts.push({ text: preText, bold: false });
+                              parts.push({ text: match[1], bold: true });
+                              lastIdx = regex.lastIndex;
+                            }
+                            const postText = line.substring(lastIdx);
+                            if (postText) parts.push({ text: postText, bold: false });
+
+                            if (parts.length > 0) {
+                              return (
+                                <p key={lIdx} className="text-stone-700 min-h-[0.5rem] text-[12px]">
+                                  {parts.map((p, pIdx) => (
+                                    <span key={pIdx} className={p.bold ? "font-black text-indigo-700 bg-indigo-50/80 px-1 rounded" : ""}>
+                                      {p.text}
+                                    </span>
+                                  ))}
+                                </p>
+                              );
+                            }
+
+                            if (line.startsWith("- ")) {
+                              return (
+                                <div key={lIdx} className="flex items-start text-stone-700 pl-1.5 text-[12px]">
+                                  <span className="text-indigo-500 mr-2 shrink-0 select-none">•</span>
+                                  <span>{line.substring(2)}</span>
+                                </div>
+                              );
+                            }
+                            
+                            return (
+                              <p key={lIdx} className="text-stone-700 min-h-[0.5rem] text-[12px]">
+                                {line}
+                              </p>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-extrabold text-stone-400 mt-1 uppercase tracking-widest font-mono">
+                        {isUser ? "You" : "Gemini Co-Pilot"} • {msg.timestamp}
+                      </span>
+                    </div>
+                  );
+                })}
+
+                {isCopilotLoading && (
+                  <div className="flex flex-col items-start mr-auto max-w-[94%] animate-pulse">
+                    <div className="bg-indigo-500/[0.04] border border-indigo-100/70 p-3.5 rounded-2xl rounded-bl-none text-[12px] text-indigo-800 font-extrabold flex items-center space-x-2.5">
+                      <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+                      <span>{project.name} 전체 샷리스트 ({shots.length}개) 및 설정 규격을 조율 중입니다...</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 3. 드로워 하단 입력창 */}
+            <div className="p-4 border-t border-stone-200 bg-stone-50/70 shrink-0">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSendCopilotMessage();
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={copilotInput}
+                  onChange={(e) => setCopilotInput(e.target.value)}
+                  disabled={isCopilotLoading}
+                  placeholder="다양한 정리, 공정 일정 조율, 마일스톤 문제파악을 무한 질문하세요..."
+                  className="flex-1 bg-white border border-stone-200 rounded-2xl text-xs px-4 py-3 font-semibold focus:outline-none focus:border-indigo-400 font-sans shadow-3xs"
+                />
+                <button
+                  type="submit"
+                  disabled={isCopilotLoading || !copilotInput.trim()}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl p-3 flex items-center justify-center transition-all duration-200 cursor-pointer disabled:opacity-40 shadow-sm shrink-0"
+                  title="질문 전송"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </button>
+              </form>
+              <div className="flex items-center justify-center gap-1 text-[8.5px] text-stone-400 font-semibold uppercase tracking-wider mt-2.5">
+                <Database className="w-3 h-3 text-stone-400" />
+                <span>에이전트 인셉션 스코프: Active VFX 샷 {shots.length}개 데이터 전량 수집</span>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

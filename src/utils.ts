@@ -92,16 +92,60 @@ export function getStatusStyle(status: string) {
 
 export function cleanAssigneeName(name: string): string {
   if (!name) return "";
-  const trimmed = name.trim();
-  const parts = trimmed.split(/\s+/);
-  if (parts.length > 1) {
-    const lastPart = parts[parts.length - 1].toLowerCase();
-    const suffixes = new Set([
-      "comp", "fx", "mm", "matte", "roto", "remove", "lgt", "anim", "layout", "vfx", "paint", "matchmove"
-    ]);
-    if (suffixes.has(lastPart)) {
-      return parts.slice(0, parts.length - 1).join(" ");
+  const partsList = name.split(",").map((item) => {
+    const trimmedItem = item.trim();
+    const words = trimmedItem.split(/\s+/);
+    if (words.length > 1) {
+      const lastWord = words[words.length - 1];
+      const preceding = words.slice(0, words.length - 1).join(" ");
+      const isPrecedingKorean = /[\uac00-\ud7a3]/.test(preceding);
+      const isLastWordEnglishWithNums = /^[a-zA-Z0-9]+$/.test(lastWord);
+      
+      const knownSuffixes = new Set([
+        "comp", "fx", "mm", "matte", "roto", "remove", "lgt", "anim", "layout", "vfx", "paint", "matchmove",
+        "ani", "asset", "cfx", "model", "modeling", "motion"
+      ]);
+      const lastWordLower = lastWord.toLowerCase();
+      
+      if ((isPrecedingKorean && isLastWordEnglishWithNums) || knownSuffixes.has(lastWordLower)) {
+        return preceding;
+      }
+    }
+    return trimmedItem;
+  });
+  return partsList.join(", ");
+}
+
+export function getVersionVideoUrl(version: any): string {
+  if (!version) return "";
+  
+  // 1. Mobile & Web optimized MP4 Proxy stream URL (Priority)
+  if (version.sg_uploaded_movie_mp4) {
+    if (typeof version.sg_uploaded_movie_mp4 === "string") {
+      return version.sg_uploaded_movie_mp4;
+    }
+    if (typeof version.sg_uploaded_movie_mp4 === "object" && version.sg_uploaded_movie_mp4.url) {
+      return version.sg_uploaded_movie_mp4.url;
     }
   }
-  return trimmed;
+
+  // 2. High-res or uploaded movie attachment URL (Secondary fallback)
+  if (version.sg_uploaded_movie) {
+    if (typeof version.sg_uploaded_movie === "string") {
+      return version.sg_uploaded_movie;
+    }
+    if (typeof version.sg_uploaded_movie === "object" && version.sg_uploaded_movie.url) {
+      return version.sg_uploaded_movie.url;
+    }
+  }
+
+  // Fallbacks for Mock db IDs using robust CORS-unrestricted Google video CDN samples
+  if (version.id === 101) {
+    return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4";
+  }
+  if (version.id === 102) {
+    return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+  }
+
+  return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
 }

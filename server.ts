@@ -11,7 +11,8 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 const CONFIG_FILE = path.join(process.cwd(), "config.json");
 const MOCK_DB_FILE = path.join(process.cwd(), "mock_db.json");
@@ -161,45 +162,88 @@ function saveMockDB(db: any) {
 
 // Helper: sort parsed tasks in professional VFX pipeline sequence
 function sortParsedTasks(parsed_tasks: any[]) {
+  const normalizedTasks = (parsed_tasks || []).map((t: any) => {
+    let rawStep = t.step || "";
+    const s = rawStep.toLowerCase().trim();
+    if (s === "matchmove" || s === "mm") {
+      rawStep = "mm";
+    } else if (s === "animation" || s === "anim" || s === "ani") {
+      rawStep = "ani";
+    } else if (s === "lighting" || s === "light" || s === "lgt") {
+      rawStep = "lgt";
+    } else if (s === "model" || s === "modeling") {
+      rawStep = "model";
+    } else if (s === "motion graphic" || s === "motion_graphic" || s === "motiongraphics" || s === "motion") {
+      rawStep = "motion";
+    } else if (s === "cfx") {
+      rawStep = "cfx";
+    } else if (s === "fx" || s === "vfx") {
+      rawStep = "fx";
+    } else if (s === "matte" || s === "matte painting" || s === "matte_painting") {
+      rawStep = "matte";
+    } else if (s === "ai") {
+      rawStep = "ai";
+    } else if (s === "comp" || s === "composite" || s === "compositing") {
+      rawStep = "comp";
+    }
+    return {
+      ...t,
+      step: rawStep
+    };
+  });
+
   const orderWeights: Record<string, number> = {
-    "mm": 0, "matchmove": 0,
-    "ani": 1, "anim": 1, "animation": 1,
-    "lgt": 2, "light": 2, "lighting": 2,
-    "fx": 3, "vfx": 3,
-    "matte": 4, "matte painting": 4, "matte_painting": 4,
-    "comp": 5, "composite": 5, "compositing": 5,
-    "roto": 6, "paint": 6,
-    "remove": 7, "prep": 7
+    "model": 10,
+    "mm": 20, "matchmove": 20,
+    "ani": 30, "anim": 30, "animation": 30,
+    "motion": 35, "motion graphic": 35, "motion_graphic": 35,
+    "cfx": 40,
+    "fx": 50, "vfx": 50,
+    "lgt": 60, "light": 60, "lighting": 60,
+    "matte": 70, "matte painting": 70, "matte_painting": 70,
+    "roto": 73, "paint": 73, "remove": 74, "prep": 74,
+    "ai": 80,
+    "comp": 90, "composite": 90, "compositing": 90
   };
 
   const getWeight = (task: any) => {
-    const step = (task.sg_task || task.step || task.content || "").toLowerCase();
+    const step = (task.step || "").toLowerCase().trim();
     for (const [k, w] of Object.entries(orderWeights)) {
-      if (step.includes(k)) {
+      if (step === k || step.includes(k)) {
         return w;
       }
     }
-    return step.includes("comp") ? 100 : 10;
+    return step.includes("comp") ? 90 : 45;
   };
 
-  return [...parsed_tasks].sort((a, b) => getWeight(a) - getWeight(b));
+  return normalizedTasks.sort((a, b) => getWeight(a) - getWeight(b));
 }
 
 // Helper: clean assignee name
 function cleanAssigneeName(name: string): string {
   if (!name) return "";
-  const trimmed = name.trim();
-  const parts = trimmed.split(/\s+/);
-  if (parts.length > 1) {
-    const lastPart = parts[parts.length - 1].toLowerCase();
-    const suffixes = new Set([
-      "comp", "fx", "mm", "matte", "roto", "remove", "lgt", "anim", "layout", "vfx", "paint", "matchmove"
-    ]);
-    if (suffixes.has(lastPart)) {
-      return parts.slice(0, parts.length - 1).join(" ");
+  const partsList = name.split(",").map((item) => {
+    const trimmedItem = item.trim();
+    const words = trimmedItem.split(/\s+/);
+    if (words.length > 1) {
+      const lastWord = words[words.length - 1];
+      const preceding = words.slice(0, words.length - 1).join(" ");
+      const isPrecedingKorean = /[\uac00-\ud7a3]/.test(preceding);
+      const isLastWordEnglishWithNums = /^[a-zA-Z0-9]+$/.test(lastWord);
+      
+      const knownSuffixes = new Set([
+        "comp", "fx", "mm", "matte", "roto", "remove", "lgt", "anim", "layout", "vfx", "paint", "matchmove",
+        "ani", "asset", "cfx", "model", "modeling", "motion"
+      ]);
+      const lastWordLower = lastWord.toLowerCase();
+      
+      if ((isPrecedingKorean && isLastWordEnglishWithNums) || knownSuffixes.has(lastWordLower)) {
+        return preceding;
+      }
     }
-  }
-  return trimmed;
+    return trimmedItem;
+  });
+  return partsList.join(", ");
 }
 
 // Helper: normalize ShotGrid status codes matching real studio settings
@@ -504,12 +548,15 @@ app.get("/api/projects", async (req, res) => {
   const config = loadConfig();
   let rawProjects: any[] = [];
   let tasks: any[] = [];
+  let allShots: any[] = [];
+  let db: any = null;
 
   try {
     if (config.use_mock || !config.base_url) {
-      const db = loadMockDB();
+      db = loadMockDB();
       rawProjects = db.projects || [];
       tasks = db.tasks || [];
+      allShots = db.shots || [];
     } else {
       const token = await getAccessToken(config);
       rawProjects = await getProjectsFromShotgrid(config, token);
@@ -519,28 +566,38 @@ app.get("/api/projects", async (req, res) => {
         return subStatus !== "fin"; // Filter out completed projects
       });
 
-      console.log(`[DEBUG] Found ${activeProjects.length} active projects on ShotGrid. Fetching tasks per project...`);
+      console.log(`[DEBUG] Found ${activeProjects.length} active projects on ShotGrid. Fetching tasks and shots per project...`);
 
-      const tasksPromises = activeProjects.map(async (p: any) => {
+      const projectsDataPromises = activeProjects.map(async (p: any) => {
         try {
-          const projTasks = await fetchShotgridSearch(
-            config,
-            token,
-            "Task",
-            [["project", "is", { type: "Project", id: p.id }]],
-            ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
-          );
-          console.log(`[DEBUG] Project "${p.name}" (ID: ${p.id}) has ${projTasks.length} tasks matching search.`);
-          return projTasks;
+          const [projTasks, projShots] = await Promise.all([
+            fetchShotgridSearch(
+              config,
+              token,
+              "Task",
+              [["project", "is", { type: "Project", id: p.id }]],
+              ["id", "content", "sg_status_list", "start_date", "due_date", "project", "entity", "step", "task_assignees", "sg_task"]
+            ),
+            fetchShotgridSearch(
+              config,
+              token,
+              "Shot",
+              [["project", "is", { type: "Project", id: p.id }]],
+              ["id", "code", "sg_status_list", "project"]
+            )
+          ]);
+          console.log(`[DEBUG] Project "${p.name}" (ID: ${p.id}) has ${projTasks.length} tasks and ${projShots.length} shots.`);
+          return { projectId: p.id, tasks: projTasks, shots: projShots };
         } catch (err: any) {
-          console.error(`[ERROR] Failed to fetch tasks for project ${p.id}:`, err.message);
-          return [];
+          console.error(`[ERROR] Failed to fetch data for project ${p.id}:`, err.message);
+          return { projectId: p.id, tasks: [], shots: [] };
         }
       });
 
-      const results = await Promise.all(tasksPromises);
-      tasks = results.flat();
-      console.log(`[DEBUG] Total tasks fetched across all active projects: ${tasks.length}`);
+      const results = await Promise.all(projectsDataPromises);
+      tasks = results.flatMap(r => r.tasks);
+      allShots = results.flatMap(r => r.shots);
+      console.log(`[DEBUG] Total tasks: ${tasks.length}, Total shots: ${allShots.length} fetched across all active projects.`);
     }
 
     const projectsWithProgress = rawProjects
@@ -551,6 +608,18 @@ app.get("/api/projects", async (req, res) => {
       .map((p: any) => {
         const projTasks = tasks.filter((t: any) => t.project?.id === p.id);
         const totalTasks = projTasks.length;
+
+        const projShots = allShots.filter((s: any) => s.project?.id === p.id);
+        let totalShotsCount = projShots.length;
+        let activeShotsCount = 0;
+
+        for (const s of projShots) {
+          const sStatus = (s.sg_status_list || "").toLowerCase().trim();
+          const isOmitOrHold = ["omit", "hold", "omt", "hld"].includes(sStatus);
+          if (!isOmitOrHold) {
+            activeShotsCount++;
+          }
+        }
 
         const subStatus = (p.sg_sub_status || "").toLowerCase().trim();
         const sg_sub_status_gray = subStatus === "onset" || subStatus === "turn over";
@@ -574,8 +643,8 @@ app.get("/api/projects", async (req, res) => {
         }
 
         // 2. Perform stats calculation
-        const groupAStatuses = ["dok", "di-sen", "qc"];
-        const groupBStatuses = ["fin", "cto", "drt"];
+        const groupAStatuses = ["dok", "di-sen", "qc", "fin"];
+        const groupBStatuses = ["cto", "drt"];
         const groupCStatuses = ["cc", "sc", "ct", "ctp", "ctr"];
 
         let completedATasks = 0;
@@ -587,14 +656,79 @@ app.get("/api/projects", async (req, res) => {
         let compTasks = 0;
         let completedComp = 0;
 
+        let compTasksCountForProgress = 0;
+        let completedCompTasksForProgress = 0;
+        let compWeight2Total = 0.0;
+        let compWeight3Total = 0.0;
+
+        let matteTotal = 0;
+        let matteFin = 0;
+        let matteTpub = 0;
+
+        let lgtTotal = 0;
+        let lgtFin = 0;
+        let lgtTpub = 0;
+
+        let fxTotal = 0;
+        let fxFin = 0;
+        let fxTpub = 0;
+
         for (const t of projTasks) {
           let status = (t.sg_status_list || "").toLowerCase().trim();
+          const rawStatus = (t.sg_status_list || "").toLowerCase().trim();
           if (["double check", "doublecheck", "dok"].includes(status)) status = "dok";
           else if (["distribute", "di-sen", "dis", "disen"].includes(status)) status = "di-sen";
           else if (["approved", "apr", "final", "fin", "complete", "cmpt", "y"].includes(status)) status = "fin";
 
           const hasCompCompleteForEntity = t.entity?.id ? completedCompEntities.has(t.entity.id) : false;
-          const isCompletedA = groupAStatuses.includes(status) || status === "fin" || hasCompCompleteForEntity;
+          const isCompletedA = groupAStatuses.includes(status) || hasCompCompleteForEntity;
+
+          const taskName = (t.sg_task || t.step?.name || t.content || "").toLowerCase();
+          const stepName = (t.step?.name || "").toLowerCase();
+
+          const isMatte = taskName.includes("matte") || taskName.includes("matter") || stepName.includes("matte");
+          const isComp = taskName.includes("comp") || stepName.includes("comp");
+          const isLgt = taskName.includes("lgt") || taskName.includes("lighting") || stepName.includes("lgt") || stepName.includes("lighting");
+          const isFx = taskName.includes("fx") || taskName.includes("effects") || stepName.includes("fx") || stepName.includes("effects");
+
+          const isTpub = rawStatus === "tpub" || rawStatus === "t-pub";
+
+          if (isMatte) {
+            matteTasks++;
+            if (isCompletedA) completedMatte++;
+            
+            matteTotal++;
+            if (isCompletedA) matteFin++;
+            if (isTpub) matteTpub++;
+          }
+          if (isComp) {
+            compTasks++;
+            if (isCompletedA) completedComp++;
+            
+            compTasksCountForProgress++;
+            if (isCompletedA) {
+              completedCompTasksForProgress++;
+              compWeight2Total += 1.0;
+              compWeight3Total += 1.0;
+            } else {
+              if (groupBStatuses.includes(status)) {
+                compWeight2Total += 0.85;
+                compWeight3Total += 0.85;
+              } else if (groupCStatuses.includes(status)) {
+                compWeight3Total += 0.75;
+              }
+            }
+          }
+          if (isLgt) {
+            lgtTotal++;
+            if (isCompletedA) lgtFin++;
+            if (isTpub) lgtTpub++;
+          }
+          if (isFx) {
+            fxTotal++;
+            if (isCompletedA) fxFin++;
+            if (isTpub) fxTpub++;
+          }
 
           if (isCompletedA) {
             completedATasks++;
@@ -608,33 +742,47 @@ app.get("/api/projects", async (req, res) => {
               weight3Total += 0.75;
             }
           }
-
-          const taskName = (t.sg_task || t.step?.name || t.content || "").toLowerCase();
-
-          const isMatte = taskName.includes("matte") || taskName.includes("matter");
-          const isComp = taskName.includes("comp");
-
-          if (isMatte) {
-            matteTasks++;
-            if (isCompletedA) completedMatte++;
-          }
-          if (isComp) {
-            compTasks++;
-            if (isCompletedA) completedComp++;
-          }
         }
 
-        const progress_1 = totalTasks > 0 ? Math.round((completedATasks / totalTasks) * 100) : 0;
-        const progress_2 = totalTasks > 0 ? Math.round((weight2Total / totalTasks) * 100) : 0;
-        const progress_3 = totalTasks > 0 ? Math.round((weight3Total / totalTasks) * 100) : 0;
+        const calcDenominator = compTasksCountForProgress > 0 ? compTasksCountForProgress : totalTasks;
+        const finalCompleted = compTasksCountForProgress > 0 ? completedCompTasksForProgress : completedATasks;
+        const finalWeight2 = compTasksCountForProgress > 0 ? compWeight2Total : weight2Total;
+        const finalWeight3 = compTasksCountForProgress > 0 ? compWeight3Total : weight3Total;
+
+        const progress_1 = calcDenominator > 0 ? Math.round((finalCompleted / calcDenominator) * 100) : 0;
+        const progress_2 = calcDenominator > 0 ? Math.round((finalWeight2 / calcDenominator) * 100) : 0;
+        const progress_3 = calcDenominator > 0 ? Math.round((finalWeight3 / calcDenominator) * 100) : 0;
 
         const matte_progress = matteTasks > 0 ? Math.round((completedMatte / matteTasks) * 100) : null;
         const comp_progress = compTasks > 0 ? Math.round((completedComp / compTasks) * 100) : null;
 
+        const matte_stats = { total: matteTotal, fin: matteFin, tpub: matteTpub };
+        const lgt_stats = { total: lgtTotal, fin: lgtFin, tpub: lgtTpub };
+        const fx_stats = { total: fxTotal, fin: fxFin, tpub: fxTpub };
+
+        // Compute comp last due date across all project tasks
+        const compTasksWithDueDate = projTasks.filter((t: any) => {
+          const taskName = (t.sg_task || t.step?.name || t.content || "").toLowerCase();
+          const stepName = (t.step?.name || "").toLowerCase();
+          const isComp = taskName.includes("comp") || stepName.includes("comp");
+          return isComp && t.due_date;
+        });
+
+        let comp_last_due_date: string | null = null;
+        if (compTasksWithDueDate.length > 0) {
+          const dueDates = compTasksWithDueDate.map((t: any) => t.due_date as string).filter(Boolean).sort();
+          if (dueDates.length > 0) {
+            comp_last_due_date = dueDates[dueDates.length - 1];
+          }
+        }
+
         console.log(`[DEBUG_PROJECT] Proj: "${p.name}" (ID: ${p.id})`);
-        console.log(` - totalTasks: ${totalTasks}, completedATasks: ${completedATasks}`);
+        console.log(` - totalTasks: ${totalTasks}, compTasksCountForProgress: ${compTasksCountForProgress}`);
         console.log(` - progress_1: ${progress_1}%, progress_2: ${progress_2}%, progress_3: ${progress_3}%`);
-        console.log(` - matte_progress: ${matte_progress}%, comp_progress: ${comp_progress}%`);
+        console.log(` - matte_stats:`, matte_stats);
+        console.log(` - lgt_stats:`, lgt_stats);
+        console.log(` - fx_stats:`, fx_stats);
+        console.log(` - comp_last_due_date: ${comp_last_due_date}`);
 
         return {
           ...p,
@@ -644,6 +792,12 @@ app.get("/api/projects", async (req, res) => {
           progress_3,
           matte_progress,
           comp_progress,
+          matte_stats,
+          lgt_stats,
+          fx_stats,
+          total_shots_count: totalShotsCount,
+          active_shots_count: activeShotsCount,
+          comp_last_due_date,
         };
       });
 
@@ -781,8 +935,13 @@ app.get("/api/project/:id/versions", async (req, res) => {
     const db = loadMockDB();
     const versions = (db.versions || []).filter((v: any) => v.project?.id === projectId);
     
-    // Sort alphabetically ascending by Version Code
-    const sortedVersions = versions.sort((a: any, b: any) => (a.code || "").localeCompare(b.code || ""));
+    // Sort descending by created_at or id
+    const sortedVersions = versions.sort((a: any, b: any) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (dateB !== dateA) return dateB - dateA;
+      return b.id - a.id;
+    });
 
     return res.json(sortedVersions);
   }
@@ -794,10 +953,15 @@ app.get("/api/project/:id/versions", async (req, res) => {
       token,
       "Version",
       [["project", "is", { type: "Project", id: projectId }]],
-      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
+      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "sg_task", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4", "created_at"]
     );
 
-    const sortedVersions = versions.sort((a: any, b: any) => (a.code || "").localeCompare(b.code || ""));
+    const sortedVersions = versions.sort((a: any, b: any) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (dateB !== dateA) return dateB - dateA;
+      return b.id - a.id;
+    });
     res.json(sortedVersions);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1001,12 +1165,16 @@ app.post("/api/task/:id/add_note", async (req, res) => {
 app.get("/api/versions", async (req, res) => {
   const config = loadConfig();
   const projectId = req.query.project_id ? parseInt(req.query.project_id as string) : null;
+  const entityId = req.query.entity_id ? parseInt(req.query.entity_id as string) : null;
 
   if (config.use_mock || !config.base_url) {
     const db = loadMockDB();
     let filtered = db.versions || [];
     if (projectId) {
       filtered = filtered.filter((v: any) => v.project?.id === projectId);
+    }
+    if (entityId) {
+      filtered = filtered.filter((v: any) => v.entity?.id === entityId);
     }
     return res.json(filtered);
   }
@@ -1017,15 +1185,24 @@ app.get("/api/versions", async (req, res) => {
     if (projectId) {
       filters.push(["project", "is", { type: "Project", id: projectId }]);
     }
+    if (entityId) {
+      filters.push(["entity", "is", { type: "Shot", id: entityId }]);
+    }
 
     const versions = await fetchShotgridSearch(
       config,
       token,
       "Version",
       filters,
-      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4"]
+      ["id", "code", "sg_status_list", "sg_version_number", "project", "entity", "description", "image", "sg_uploaded_movie", "sg_uploaded_movie_mp4", "created_at"]
     );
-    res.json(versions);
+    const sortedVersions = versions.sort((a: any, b: any) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (dateB !== dateA) return dateB - dateA;
+      return b.id - a.id;
+    });
+    res.json(sortedVersions);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1329,7 +1506,7 @@ async function fetchVideoAsBase64(url: string, maxBytes = 15 * 1024 * 1024): Pro
 }
 
 async function generateContentWithFallback(ai: any, options: { contents: any, config?: any }) {
-  const models = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+  const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"];
   let lastError: any = null;
 
   for (const model of models) {
@@ -1697,6 +1874,81 @@ app.post("/api/intelligence/save-note", async (req, res) => {
   }
 });
 
+app.post("/api/intelligence/project-copilot", async (req, res) => {
+  const { projectId, projectName, customSystemInstructions, shots, chatHistory, userMessage } = req.body;
+  const hasApiKey = !!process.env.GEMINI_API_KEY;
+
+  if (!hasApiKey) {
+    const containsBottleneck = (userMessage || "").toLowerCase().includes("병목") || (userMessage || "").toLowerCase().includes("문제") || (userMessage || "").toLowerCase().includes("위험");
+    const containsSchedule = (userMessage || "").toLowerCase().includes("스케줄") || (userMessage || "").toLowerCase().includes("일정") || (userMessage || "").toLowerCase().includes("정리") || (userMessage || "").toLowerCase().includes("스킵") || (userMessage || "").toLowerCase().includes("계획");
+    
+    let fallbackText = `### 🛰️ Gemini VFX 프로젝트 글로벌 대형 에이전트 분석 (데모 모드)
+*설정된 시스템 규칙: "${customSystemInstructions || "기본 VFX PM 비서 모드"}"*
+
+1. **상태 진단 및 스케줄링 소견**:
+   - 현재 프로젝트는 총 **${shots?.length || 0}개**의 active VFX 샷을 모니터링 중입니다.
+   - ${containsSchedule ? "프로젝트의 샷 마감일정 및 담당자의 분포를 대조 확인하였습니다. 특정 작업자(예: 로토합성 엔지니어) 또는 특정 파이프라인 구간에 태스크가 편성되어 과도한 오버타임이 우려됩니다. 작업 일정을 주차별로 고르게 분비하고 완료도가 85% 이상인 샷은 수퍼바이저 퀵 리뷰(rev)로 이관할 것을 권장합니다." : "프로젝트 샷리스트를 횡단 분석하여 우선 완료되어야 하는 콤프(Comp) 작업라인의 병목을 실시간 감지하였습니다."}
+
+2. **사용자 지정 전제 조건 적용**:
+   - 부여하신 전제 조건 ("${customSystemInstructions || "없음"}")을 샷리스트 전 영역에 반영하여 특이 패턴을 발굴했습니다.
+   ${containsBottleneck ? "- **병목 현상(Bottleneck) 경고 및 리스크**: 장시간 'Pending' 및 'Ready to Start' 상태로 묶인 합성 이전 프로세스(매치무브 및 이펙트 소스 확보)가 확인됩니다. 특히 최종 완료 가중치 계산에서 상위 단계에 있는 샷들의 공정을 선제 지원하는 리소스 재배치가 시급합니다." : "- **VFX 워크플로우 효율화**: 진행 중인 태스크에 75% 이상의 중간 진행률 가중치를 미리 적용하는 스마트 스케줄 가이드를 검토 중입니다."}
+
+3. **제시드되는 액션 가이드**:
+   - 이 에이전트는 사용자가 설정해둔 특정 규칙에 맞춰 다면적으로 정리 및 최적화를 시도합니다. 실제 API Key를 입력하시면 더 정규화된 데이터 기반 제미나이 마스터 피드백을 실시간 수령할 수 있습니다.`;
+
+    return res.json({ responseText: fallbackText });
+  }
+
+  try {
+    const ai = getAIClient();
+    const systemRule = customSystemInstructions || "당신은 능숙한 대형 VFX 프로덕션의 총괄 테크니컬 리드이자 VP/PM인 'Gemini VFX Co-Pilot'입니다. 논리적이고 친절하며 분석적인 한국어로 대답하십시오.";
+    
+    const formattedShots = (shots || []).map((s: any) => {
+      const taskSummaries = (s.tasks || []).map((t: any) => {
+        const name = t.sg_task || (t.step && typeof t.step === "object" ? t.step.name : t.step) || t.content || "";
+        const assignee = t.task_assignees ? t.task_assignees.map((u: any) => u.name).join(", ") : "없음";
+        return `${name}[${t.sg_status_list || "wtg"}](${assignee})`;
+      }).join(", ");
+      return `- 샷 ${s.code || s.name}: 상태 [${s.sg_status || "Active"}] | 태스크: ${taskSummaries || "없음"}`;
+    }).join("\n");
+
+    const formattedHistory = (chatHistory || []).map((h: any) => {
+      return `${h.sender === "user" ? "사용자" : "AI 에이전트"}: ${h.text}`;
+    }).join("\n");
+
+    const prompt = `
+[시스템 프롬프트 및 사용자 지정 세부 규칙/조건]
+${systemRule}
+
+[현재 모니터링 중인 전체 프로젝트 데이터 정보]
+- 프로젝트 이름: ${projectName || "진행 프로젝트"}
+- 프로젝트 총 샷 수: ${shots?.length || 0}개
+- 전체 상세 샷리스트 현황 (코드명, 상태 및 각 태스크 세부 상황):
+${formattedShots || "샷 정보 없음"}
+
+[대화 히스토리]
+${formattedHistory || "이전 대화 없음"}
+
+[새로운 사용자 요청 사항]
+"${userMessage}"
+
+요구 사항:
+1. 사용자가 부여해 둔 [시스템 프롬프트 및 사용자 지정 세부 규칙/조건]을 가장 최우선이자 규칙의 기본 세팅으로 삼아 분석에 철저하게 반영하십시오.
+2. 현재 프로젝트의 전체 샷 데이터를 면밀히 바탕 삼아, 스케줄링 조율, 병목 및 위험 요소 파악, 정리 등 다각도의 정교한 가이드라인을 제공해주십시오.
+3. 구체적인 샷 코드나 담당자 이름, 작업 진행 단계(Comp, Matte 등)를 언급하여 전문적이며 확실한 해답을 주십시오.
+4. 마크다운으로 가독성 있고 일목요연하게 작성하여 VFX 팀원 모두가 보기 편하게 답변해주십시오.
+`;
+
+    const response = await generateContentWithFallback(ai, {
+      contents: prompt,
+    });
+
+    res.json({ responseText: response.text || "에이전트가 답변을 생성하지 못했습니다." });
+  } catch (err: any) {
+    res.status(500).json({ error: `Gemini Project Co-Pilot 에러: ${err.message}` });
+  }
+});
+
 // --- DASHBOARD AGGREGATES ---
 app.get("/api/dashboard-stats", async (req, res) => {
   const config = loadConfig();
@@ -1874,6 +2126,7 @@ app.get("/api/dday-tasks", async (req, res) => {
         return {
           id: t.id,
           shot_code: t.entity?.name || t.entity?.code || "Unknown Shot",
+          entity: t.entity ? { id: t.entity.id, name: t.entity.name, type: t.entity.type } : null,
           due_date: t.due_date,
           status: t.sg_status_list || "wtg",
           assignee: assigneeName,

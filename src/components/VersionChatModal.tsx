@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Brain, X, PlayCircle, Loader2, Send, Eye, EyeOff, Info } from "lucide-react";
+import { Brain, X, PlayCircle, Loader2, Send, Eye, EyeOff, Info, ClipboardList, MessageSquareMore, Film, FileText, Plus } from "lucide-react";
 import { Version, Shot } from "../types";
 
 interface VersionChatModalProps {
@@ -22,7 +22,16 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
   >([]);
   const [currentVersionMessage, setCurrentVersionMessage] = useState<string>("");
   const [isVersionChatLoading, setIsVersionChatLoading] = useState<boolean>(false);
+  
+  // 4 Core selective Gemini analysis configuration states (highly flexible toggles)
+  const [includeShotDescription, setIncludeShotDescription] = useState<boolean>(true);
+  const [includeWorkOrder, setIncludeWorkOrder] = useState<boolean>(true);
+  const [includeVersionDescription, setIncludeVersionDescription] = useState<boolean>(true);
   const [enableVision, setEnableVision] = useState<boolean>(false);
+
+  // Toggle state to collapse/expand optional configurations via + button like Gemini app
+  const [showContextToggles, setShowContextToggles] = useState<boolean>(true);
+
   const [versionAnalysisMode, setVersionAnalysisMode] = useState<
     "general" | "clipping" | "tracking" | "lighting"
   >("general");
@@ -128,9 +137,9 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
           userMessage: userMsg,
           chatHistory: formattedHistory,
           analysisMode: versionAnalysisMode,
-          shotDescription: matchedShot?.description || "",
-          shotWorkOrder: matchedShot?.sg_work_order || "",
-          versionDescription: version.description || "",
+          shotDescription: includeShotDescription ? (matchedShot?.description || "") : "",
+          shotWorkOrder: includeWorkOrder ? (matchedShot?.sg_work_order || "") : "",
+          versionDescription: includeVersionDescription ? (version.description || "") : "",
           enableVision: enableVision,
         }),
       });
@@ -170,10 +179,10 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
   return (
     <div 
       style={viewportStyle}
-      className="fixed inset-0 z-50 flex sm:items-center justify-center sm:p-4 bg-black/70 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-50 flex sm:items-center justify-center sm:p-2 md:p-4 bg-black/70 backdrop-blur-sm animate-fade-in"
     >
       <div
-        className="bg-white border-0 sm:border border-stone-200 rounded-none sm:rounded-3xl p-4 sm:p-6 shadow-2xl relative w-full sm:max-w-[95vw] lg:max-w-6xl xl:max-w-7xl flex flex-col h-full sm:h-[85vh] sm:max-h-[850px] max-h-full"
+        className="bg-white border-0 sm:border border-stone-200 rounded-none sm:rounded-3xl p-4 sm:p-6 shadow-2xl relative w-full sm:max-w-[98vw] lg:max-w-[96vw] xl:max-w-[96vw] flex flex-col h-full sm:h-[93vh] sm:max-h-[1000px] max-h-full"
       >
         {/* Header */}
         <div className="flex justify-between items-start border-b border-stone-150 pb-4 mb-4 shrink-0">
@@ -185,7 +194,7 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
               <div className="flex items-center space-x-2">
                 <h3 className="text-sm font-black text-stone-900 leading-none">제미나이 AI 영상 분석 공정</h3>
                 <span className="bg-indigo-100 text-indigo-800 text-[8px] font-black uppercase px-2 py-0.5 rounded-md font-mono tracking-wider">
-                  gemini-3.5-flash
+                  gemini-2.5-flash
                 </span>
               </div>
               <div className="text-[10px] text-stone-400 font-bold mt-1 flex items-center gap-1.5 flex-wrap">
@@ -291,50 +300,125 @@ export const VersionChatModal: React.FC<VersionChatModalProps> = ({
 
         {/* Input Form */}
         <div className="shrink-0">
-          {/* Selective Vision analysis controller panel */}
-          <div className="bg-stone-50 border border-stone-200 rounded-2xl p-3.5 mb-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-stone-800">
-            <div className="flex items-start space-x-3">
-              <div className={`p-2 rounded-xl border ${enableVision ? 'bg-indigo-50 border-indigo-100 text-indigo-600 animate-pulse' : 'bg-stone-100 border-stone-250 text-stone-500'}`}>
-                {enableVision ? <Eye className="w-4.5 h-4.5" /> : <EyeOff className="w-4.5 h-4.5" />}
-              </div>
-              <div className="flex flex-col">
-                <span className="text-[13px] font-black text-stone-900 tracking-tight leading-normal">
-                  {enableVision ? "🎬 실시간 비디오 검수 가동 중 (Gemini Frame Vision)" : "📋 공정 메타데이터 분석 가동 중 (Metadata Only)"}
-                </span>
-                <span className="text-[10.5px] font-bold text-stone-500 leading-normal mt-0.5 max-w-2xl">
-                  {enableVision 
-                    ? "동영상 프레임을 직접 Ingest하여 비주얼 클리핑 및 모션 결함을 정밀 검출합니다. (최초 1회만 Gemini File API에 업로드 보관되어 48시간 이내 반복 재질문 시 추가 다운로드 요금 및 Egress 트래픽이 완전히 면제됩니다.)"
-                    : "비행 일정, 아티스트 파이프라인 노트, 작업지시서와 같은 메타데이터 위주로 빠르게 비교 대조합니다. (비디오 Vision 연동이 비활성화되어 추론 요금이 극소화되고 속도가 수 배 빠릅니다.)"
-                  }
+          {/* Selective analysis context manager (4 multi-select togglers) */}
+          {showContextToggles && (
+            <div className="bg-stone-50 border border-stone-200 rounded-2xl p-3 mb-3 animate-[fadeIn_0.2s_ease-out]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 mb-2 border-b border-stone-150 gap-1.5">
+                <div className="flex items-center space-x-1.5">
+                  <Brain className="w-4 h-4 text-indigo-600 animate-pulse" />
+                  <span className="text-[11px] font-black text-stone-800 uppercase tracking-wider">
+                    제미나이 분석 컨텍스트 조건 설정 (Multi-Select)
+                  </span>
+                </div>
+                <span className="text-[9.5px] text-stone-400 font-bold">
+                  비교 대조할 데이터를 선택적으로 온/오프할 수 있습니다.
                 </span>
               </div>
-            </div>
 
-            <div className="flex items-center space-x-1.5 shrink-0 self-end md:self-auto">
-              <button
-                type="button"
-                onClick={() => setEnableVision(false)}
-                className={`px-3 py-1.5 rounded-xl text-[12px] font-black tracking-tight transition cursor-pointer border ${!enableVision ? 'bg-white border-stone-300 text-stone-900 shadow-sm' : 'bg-stone-100 border-stone-200 text-stone-500 hover:bg-stone-200'}`}
-              >
-                메타데이터 전용 (절약)
-              </button>
-              <button
-                type="button"
-                className={`px-3 py-1.5 rounded-xl text-[12px] font-black tracking-tight transition cursor-pointer border ${enableVision ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm' : 'bg-stone-100 border-stone-200 text-stone-500 hover:bg-stone-200'}`}
-                onClick={() => setEnableVision(true)}
-              >
-                비디오 Vision 검수 활성
-              </button>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {/* Option 1: Description */}
+                <button
+                  type="button"
+                  onClick={() => setIncludeShotDescription(prev => !prev)}
+                  className={`flex items-center space-x-2.5 p-2 rounded-xl border transition cursor-pointer select-none text-left ${
+                    includeShotDescription
+                      ? "bg-indigo-50/50 border-indigo-400 text-indigo-900 shadow-3xs"
+                      : "bg-white border-stone-200 text-stone-450 hover:border-stone-300 hover:bg-stone-50/50"
+                  }`}
+                >
+                  <div className={`p-1.5 rounded-lg ${includeShotDescription ? "bg-indigo-100/70" : "bg-stone-100"}`}>
+                    <FileText className={`w-3.5 h-3.5 shrink-0 ${includeShotDescription ? "text-indigo-700" : "text-stone-400"}`} />
+                  </div>
+                  <div className="leading-tight min-w-0 flex-1">
+                    <p className="font-extrabold text-[12px] truncate">기획 설명</p>
+                    <p className="text-[8.5px] font-bold text-stone-400 truncate mt-0.5">Description</p>
+                  </div>
+                </button>
+
+                {/* Option 2: Work Order */}
+                <button
+                  type="button"
+                  onClick={() => setIncludeWorkOrder(prev => !prev)}
+                  className={`flex items-center space-x-2.5 p-2 rounded-xl border transition cursor-pointer select-none text-left ${
+                    includeWorkOrder
+                      ? "bg-indigo-50/50 border-indigo-400 text-indigo-900 shadow-3xs"
+                      : "bg-white border-stone-200 text-stone-450 hover:border-stone-300 hover:bg-stone-50/50"
+                  }`}
+                >
+                  <div className={`p-1.5 rounded-lg ${includeWorkOrder ? "bg-indigo-100/70" : "bg-stone-100"}`}>
+                    <ClipboardList className={`w-3.5 h-3.5 shrink-0 ${includeWorkOrder ? "text-indigo-700" : "text-stone-400"}`} />
+                  </div>
+                  <div className="leading-tight min-w-0 flex-1">
+                    <p className="font-extrabold text-[12px] truncate">작업 지시서</p>
+                    <p className="text-[8.5px] font-bold text-stone-400 truncate mt-0.5">Work Order</p>
+                  </div>
+                </button>
+
+                {/* Option 3: Artist Comment */}
+                <button
+                  type="button"
+                  onClick={() => setIncludeVersionDescription(prev => !prev)}
+                  className={`flex items-center space-x-2.5 p-2 rounded-xl border transition cursor-pointer select-none text-left ${
+                    includeVersionDescription
+                      ? "bg-indigo-50/50 border-indigo-400 text-indigo-900 shadow-3xs"
+                      : "bg-white border-stone-200 text-stone-450 hover:border-stone-300 hover:bg-stone-50/50"
+                  }`}
+                >
+                  <div className={`p-1.5 rounded-lg ${includeVersionDescription ? "bg-indigo-100/70" : "bg-stone-100"}`}>
+                    <MessageSquareMore className={`w-3.5 h-3.5 shrink-0 ${includeVersionDescription ? "text-indigo-700" : "text-stone-400"}`} />
+                  </div>
+                  <div className="leading-tight min-w-0 flex-1">
+                    <p className="font-extrabold text-[12px] truncate">아티스트 의견</p>
+                    <p className="text-[8.5px] font-bold text-stone-400 truncate mt-0.5">Comment</p>
+                  </div>
+                </button>
+
+                {/* Option 4: Vision */}
+                <button
+                  type="button"
+                  onClick={() => setEnableVision(prev => !prev)}
+                  className={`flex items-center space-x-2.5 p-2 rounded-xl border transition cursor-pointer select-none text-left ${
+                    enableVision
+                      ? "bg-rose-50 border-rose-400 text-rose-950 shadow-3xs animate-pulse"
+                      : "bg-white border-stone-200 text-stone-450 hover:border-stone-300 hover:bg-stone-50/50"
+                  }`}
+                >
+                  <div className={`p-1.5 rounded-lg ${enableVision ? "bg-rose-100" : "bg-stone-100"}`}>
+                    <Film className={`w-3.5 h-3.5 shrink-0 ${enableVision ? "text-rose-600 animate-spin" : "text-stone-400"}`} style={{ animationDuration: enableVision ? '6s' : '0s' }} />
+                  </div>
+                  <div className="leading-tight min-w-0 flex-1">
+                    <p className="font-extrabold text-[12px] truncate">비디오 검수</p>
+                    <p className="text-[8.5px] font-bold text-stone-400 truncate mt-0.5">Gemini Vision</p>
+                  </div>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleSendVersionChatMessage();
             }}
-            className="flex items-center space-x-2"
+            className="flex items-center space-x-2 bg-white pb-1"
           >
+            {/* Gemini-like Expandable Plus (+) Button */}
+            <button
+              type="button"
+              onClick={() => setShowContextToggles(prev => !prev)}
+              className={`p-3.5 rounded-2xl border transition duration-200 shrink-0 cursor-pointer flex items-center justify-center ${
+                showContextToggles
+                  ? "bg-indigo-600 border-indigo-600 text-white shadow-md active:bg-indigo-700"
+                  : "bg-stone-100 hover:bg-stone-250 border-stone-200 text-stone-600 hover:text-stone-950 active:bg-stone-200"
+              }`}
+              title="제미나이 조건 설정 필터 켜기/끄기"
+            >
+              <Plus
+                className="w-5.5 h-5.5 transition-transform duration-300"
+                style={{ transform: showContextToggles ? "rotate(45deg)" : "rotate(0deg)" }}
+              />
+            </button>
+
             <div className="relative flex-1">
               <input
                 type="text"
